@@ -45,23 +45,24 @@ library(clinfun)
 library(dplyr)
 library(openxlsx)
 library(writexl)
-setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir =  "C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 ```
+
+
 
 ## Data Import
 
 ```{r}
 # load data
-
-preprocessed_file_path <- "../../../data/analysis/loa/loa_data.csv"
+preprocessed_file_path <- "data/analysis/loa/loa_data.csv"
 data <- read.table(preprocessed_file_path, sep=",", header = T, check.names = F)
-imputed_file_path <- "../../../data/analysis/loa/loa_data_imp.csv"
+imputed_file_path <- "data/analysis/loa/loa_data_imp.csv"
 data_imp <- read.table(imputed_file_path, sep=",", header = T, check.names = F)
-```
 
-```{r}
 # get protein names
-proteins <- read.table("../../../data/preprocessing_boris/NTD_min1peptides/NTD_min1peptides_ProteinMaxLFQ_reprep_logtransformed.tsv", sep="\t", check.names=FALSE)
+proteins <- read.table("data/preprocessing_boris/NTD_min1peptides/NTD_min1peptides_ProteinMaxLFQ_reprep_logtransformed.tsv", sep="\t", check.names=FALSE)
 colnames(proteins) <- proteins[3, ]
 row.names(proteins) <- NULL
 protein_map <- proteins[4:length(row.names(proteins)),1:2]
@@ -75,7 +76,6 @@ common_genenames <- common_genenames$Genes
 data[, common_uniprot] <- as.data.frame(sapply(data[, common_uniprot], as.numeric))
 
 ```
-
 ```{r}
 
 data <- data[(data$infection=="loa") | (data$infection=="healthy controls"), ]
@@ -92,7 +92,6 @@ data[data$infection == "healthy controls", "infection"] <- "CTRL"
 ## Differential Expression Analysis
 
 ```{r}
-
 design_infection <- model.matrix(~0+infection, data=data)
 colnames(design_infection) <- gsub("infection", "", colnames(design_infection))
 design_infection <- design_infection[,c("CTRL", "loa")]
@@ -116,7 +115,7 @@ res_infection <- topTable(fit3_infection, n=Inf, adjust="BH")
 rownames(protein_map) <- protein_map$Protein.Group
 res_infection$genes <- protein_map[row.names(res_infection), "Genes"]
 
-write.csv(res_infection, "../../../results/loaloa/tables/dea_limma/ctrl_infected.csv")
+write.csv(res_infection, "results/loaloa/tables/dea_limma/ctrl_infected.csv")
 
 plot(res_infection$logFC, -log10(res_infection$P.Value))
 plot(res_infection$logFC, -log10(res_infection$adj.P.Val))
@@ -143,9 +142,6 @@ edo <- enrichDO(gene         = entrez_ids,
 dotplot(ego)
 ?enrichGO
 
-```
-
-```{r}
 dotplot(edo)
 ```
 
@@ -187,9 +183,9 @@ res_mf_ew$genes <- protein_map[row.names(res_mf_ew), "Genes"]
 res_mf_ewmf$genes <- protein_map[row.names(res_mf_ewmf), "Genes"]
 res_ew_ewmf$genes <- protein_map[row.names(res_ew_ewmf), "Genes"]
 
-write.csv(res_mf_ew, "../../../results/loaloa/tables/dea_limma/mf_ew.csv")
-write.csv(res_mf_ewmf, "../../../results/loaloa/tables/dea_limma/mf_ewmf.csv")
-write.csv(res_ew_ewmf, "../../../results/loaloa/tables/dea_limma/ew_ewmf.csv")
+write.csv(res_mf_ew, "results/loaloa/tables/dea_limma/mf_ew.csv")
+write.csv(res_mf_ewmf, "results/loaloa/tables/dea_limma/mf_ewmf.csv")
+write.csv(res_ew_ewmf, "results/loaloa/tables/dea_limma/ew_ewmf.csv")
 
 
 ```
@@ -224,9 +220,9 @@ res_mf_ew_rl$genes <- protein_map[row.names(res_mf_ew_rl), "Genes"]
 res_mf_ewmf_rl$genes <- protein_map[row.names(res_mf_ewmf_rl), "Genes"]
 res_ew_ewmf_rl$genes <- protein_map[row.names(res_ew_ewmf_rl), "Genes"]
 
-write.csv(res_mf_ew_rl, "../../../results/loaloa/tables/dea_limma/mf_ew_rl.csv")
-write.csv(res_mf_ewmf_rl, "../../../results/loaloa/tables/dea_limma/mf_ewmf_rl.csv")
-write.csv(res_ew_ewmf_rl, "../../../results/loaloa/tables/dea_limma/ew_ewmf_rl.csv")
+write.csv(res_mf_ew_rl, "results/loaloa/tables/dea_limma/mf_ew_rl.csv")
+write.csv(res_mf_ewmf_rl, "results/loaloa/tables/dea_limma/mf_ewmf_rl.csv")
+write.csv(res_ew_ewmf_rl, "results/loaloa/tables/dea_limma/ew_ewmf_rl.csv")
 
 plot(res_mf_ew_rl$logFC, -log10(res_mf_ew_rl$P.Value))
 plot(res_mf_ewmf_rl$logFC, -log10(res_mf_ew_rl$P.Value))
@@ -316,7 +312,5 @@ for (i in 1:length(clinical_symptoms_bin)) {
   
 }
 # Export  
-write.xlsx(df_res_list, "sympt_stat_analysis.xlsx")
-
-
+write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis.xlsx")
 ```
