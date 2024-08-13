@@ -75,9 +75,6 @@ common_genenames <- common_genenames$Genes
 # Convert all protein columns to numeric
 data[, common_uniprot] <- as.data.frame(sapply(data[, common_uniprot], as.numeric))
 
-```
-```{r}
-
 data <- data[(data$infection=="loa") | (data$infection=="healthy controls"), ]
 
 data <- data[which((data$eos_abs < 0.5 & data$`disease severity` == "healthy control") | data$`disease severity` != "healthy control"), ]
@@ -140,8 +137,6 @@ edo <- enrichDO(gene         = entrez_ids,
 
 
 dotplot(ego)
-?enrichGO
-
 dotplot(edo)
 ```
 
@@ -237,8 +232,11 @@ plot(res_ew_ewmf_rl$logFC, -log10(res_ew_ewmf_rl$adj.P.Val))
 ## Trend Analysis of control and Ew positive patients
 
 ```{r}
+dim(data[data["pru_history_severity"]=="Ctrl asympt.",])[1]
+```
 
-# 
+
+```{r}
 
 data <- as.data.frame(data)
 
@@ -248,9 +246,9 @@ df_res_list <- list()
 
 for (i in 1:length(clinical_symptoms_bin)) {
   c <- clinical_symptoms_bin[i]
-  
   print(c)
   
+    
   data_symp <- data[
     (data[c] == "Ctrl asympt.") | (data[c] == "Ctrl sympt.") | (data[c] == "EW asympt.") | (data[c] == "EW sympt."),]
   data_symp[data_symp[c] == "Ctrl asympt.", c] = 1
@@ -260,12 +258,24 @@ for (i in 1:length(clinical_symptoms_bin)) {
   
   # Functions to conduct kruskal wallis and jonkheere - terpstra test
   kw_protein <- function(p_col, g_col) {
-    vec <- split(data_symp[[p_col]], data_symp[[g_col]])
-    test_res <- kruskal.test(vec)
+    # vec <- split(data_symp[[p_col]], data_symp[[g_col]])
+    # print(vec)
+    df <- data_symp[complete.cases(data_symp[, p_col]),]
+    test_res <- kruskal.test(x=df[,p_col], g=as.numeric(df[,g_col]))
+    
+    # test_res <- kruskal.test(vec)
     return(
       list(
         KW_statistic = test_res$statistic,
-        KW_p_value = test_res$p.value
+        KW_p_value = test_res$p.value,
+        n_ctrl_asympt = dim(df[df[g_col]==1,])[1],
+        n_ctrl_sympt = dim(df[df[g_col]==2,])[1],
+        n_ew_asympt = dim(df[df[g_col]==3,])[1],
+        n_ew_sympt = dim(df[df[g_col]==4,])[1],
+        median_ctrl_asympt = median(df[df[g_col]==1, p_col]),
+        median_ctrl_sympt = median(df[df[g_col]==2, p_col]),
+        median_ew_asympt = median(df[df[g_col]==3, p_col]),
+        median_ew_sympt = median(df[df[g_col]==4, p_col])
       )
     )
   }
@@ -290,8 +300,6 @@ for (i in 1:length(clinical_symptoms_bin)) {
     jt_protein(p_col, c)
   })
   
-  
-  
   results_df_kruskal <- do.call(
     rbind, lapply(results_list_kruskal, as.data.frame))
   results_df_kruskal$KW_adj_pvalue <- p.adjust(
@@ -309,7 +317,7 @@ for (i in 1:length(clinical_symptoms_bin)) {
   # collect results in list of dataframes
   c_temp <- gsub("_severity", "", clinical_symptoms_bin[i])
   df_res_list[[c_temp]] <- res_kw_jt
-  
+
 }
 # Export  
 write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis.xlsx")
