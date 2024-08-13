@@ -1,0 +1,13 @@
+# anything within data
+data/
+tmpData/
+# any of the images created
+images/*
+results/*
+# any html or xls, xlsx etc files.
+*.RData
+*.png
+*.html
+*.pdf
+*.xls
+*.xlsx
