@@ -60,6 +60,8 @@ preprocessed_file_path <- "data/analysis/loa/loa_data.csv"
 data <- read.table(preprocessed_file_path, sep=",", header = T, check.names = F)
 imputed_file_path <- "data/analysis/loa/loa_data_imp.csv"
 data_imp <- read.table(imputed_file_path, sep=",", header = T, check.names = F)
+adj_file_path <- "data/analysis/loa/loa_data_adj.csv"
+data_adj <- read.table(adj_file_path, sep=",", header = T, check.names = F)
 
 # get protein names
 proteins <- read.table("data/preprocessing_boris/NTD_min1peptides/NTD_min1peptides_ProteinMaxLFQ_reprep_logtransformed.tsv", sep="\t", check.names=FALSE)
@@ -74,16 +76,20 @@ common_genenames <- common_genenames$Genes
 
 # Convert all protein columns to numeric
 data[, common_uniprot] <- as.data.frame(sapply(data[, common_uniprot], as.numeric))
+data_adj[, common_uniprot] <- as.data.frame(sapply(data_adj[, common_uniprot], as.numeric))
 
 data <- data[(data$infection=="loa") | (data$infection=="healthy controls"), ]
+data_adj <- data[(data_adj$infection=="loa") | (data_adj$infection=="healthy controls"), ]
 
 data <- data[which((data$eos_abs < 0.5 & data$`disease severity` == "healthy control") | data$`disease severity` != "healthy control"), ]
+data_adj <- data_adj[which((data_adj$eos_abs < 0.5 & data_adj$`disease severity` == "healthy control") | data_adj$`disease severity` != "healthy control"), ]
 
 data$disease_severity <- data$`disease severity`
 data[data$disease_severity == "healthy control", "disease_severity"] <- "CTRL"
 data[data$disease_severity == "HYMF", "disease_severity"] <- "MF"
 
 data[data$infection == "healthy controls", "infection"] <- "CTRL"
+data_adj[data_adj$infection == "healthy controls", "infection"] <- "CTRL"
 ```
 
 ## Differential Expression Analysis
@@ -231,14 +237,14 @@ plot(res_ew_ewmf_rl$logFC, -log10(res_ew_ewmf_rl$adj.P.Val))
 
 ## Trend Analysis of control and Ew positive patients
 
+Since there are differences in the age and sex distribution between the 
+asymptomatic and symptomatic group, we perform this analysis on data, that
+was adjusted by linear modeling (protAbund ~ sex + age). 
+Residuals + median protein abundance were used for subsequent analysis.
+
 ```{r}
-dim(data[data["pru_history_severity"]=="Ctrl asympt.",])[1]
-```
 
-
-```{r}
-
-data <- as.data.frame(data)
+data_adj <- as.data.frame(data_adj)
 
 clinical_symptoms_bin <- colnames(data)[382:411]
 
@@ -249,8 +255,8 @@ for (i in 1:length(clinical_symptoms_bin)) {
   print(c)
   
     
-  data_symp <- data[
-    (data[c] == "Ctrl asympt.") | (data[c] == "Ctrl sympt.") | (data[c] == "EW asympt.") | (data[c] == "EW sympt."),]
+  data_symp <- data_adj[
+    (data_adj[c] == "Ctrl asympt.") | (data_adj[c] == "Ctrl sympt.") | (data_adj[c] == "EW asympt.") | (data_adj[c] == "EW sympt."),]
   data_symp[data_symp[c] == "Ctrl asympt.", c] = 1
   data_symp[data_symp[c] == "Ctrl sympt.", c] = 2
   data_symp[data_symp[c] == "EW asympt.", c] = 3
