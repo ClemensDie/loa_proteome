@@ -56,6 +56,8 @@ knitr::opts_knit$set(root.dir =  "C:/Users/cleme/OneDrive - Charité - Universit
 
 ```{r}
 # load data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
 preprocessed_file_path <- "data/analysis/loa/loa_data.csv"
 data <- read.table(preprocessed_file_path, sep=",", header = T, check.names = F)
 imputed_file_path <- "data/analysis/loa/loa_data_imp.csv"
@@ -70,7 +72,8 @@ row.names(proteins) <- NULL
 protein_map <- proteins[4:length(row.names(proteins)),1:2]
 
 # common uniprot ids
-common_uniprot <- colnames(data)[99:345]
+common_uniprot <- colnames(data)[98:371]
+common_genenames <- protein_map %>% filter(Protein.Group %in% common_uniprot)
 common_genenames <- protein_map %>% filter(Protein.Group %in% common_uniprot)
 common_genenames <- common_genenames$Genes
 
@@ -95,12 +98,19 @@ data_adj[data_adj$infection == "healthy controls", "infection"] <- "CTRL"
 ## Differential Expression Analysis
 
 ```{r}
+table(data["infection"])
+```
+
+
+```{r}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
 design_infection <- model.matrix(~0+infection, data=data)
 colnames(design_infection) <- gsub("infection", "", colnames(design_infection))
 design_infection <- design_infection[,c("CTRL", "loa")]
 
-
-common_uniprot <- colnames(data)[99:345]
+# 
+# common_uniprot <- colnames(data)[99:345]
 
 data[,colnames(data) %in% common_uniprot] <- as.data.frame(sapply(data[colnames(data) %in% common_uniprot], as.numeric))
 fit_infection <- lmFit(t(data[,colnames(data) %in% common_uniprot]), design = design_infection)
@@ -150,6 +160,8 @@ dotplot(edo)
 
 ```{r}
 ### Severity Groups
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
 
 data$disease_severity <- as.factor(data$disease_severity)
 design <- model.matrix(~0+disease_severity, data=data)
@@ -193,6 +205,8 @@ write.csv(res_ew_ewmf, "results/loaloa/tables/dea_limma/ew_ewmf.csv")
 
 ```{r}
 ## only with data with raploa 1 year
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
 data_rl <- data[((data$disease_severity == "EW") & (data$rl_lastyear == 1)) | ((data$disease_severity == "EWMF") & (data$rl_lastyear == 1)) | (data$disease_severity == "MF"),]
 
 design <- model.matrix(~0+disease_severity, data=data_rl)
@@ -243,6 +257,97 @@ was adjusted by linear modeling (protAbund ~ sex + age).
 Residuals + median protein abundance were used for subsequent analysis.
 
 ```{r}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+data <- as.data.frame(data)
+
+clinical_symptoms_bin <- colnames(data)[382:411]
+
+df_res_list <- list()
+
+for (i in 1:length(clinical_symptoms_bin)) {
+  c <- clinical_symptoms_bin[i]
+  print(c)
+  
+    
+  data_symp <- data[
+    (data[c] == "Ctrl asympt.") | (data[c] == "Ctrl sympt.") | (data[c] == "EW asympt.") | (data[c] == "EW sympt."),]
+  data_symp[data_symp[c] == "Ctrl asympt.", c] = 1
+  data_symp[data_symp[c] == "Ctrl sympt.", c] = 2
+  data_symp[data_symp[c] == "EW asympt.", c] = 3
+  data_symp[data_symp[c] == "EW sympt.", c] = 4
+  
+  # Functions to conduct kruskal wallis and jonkheere - terpstra test
+  kw_protein <- function(p_col, g_col) {
+    # vec <- split(data_symp[[p_col]], data_symp[[g_col]])
+    # print(vec)
+    df <- data_symp[complete.cases(data_symp[, p_col]),]
+    test_res <- kruskal.test(x=df[,p_col], g=as.numeric(df[,g_col]))
+    
+    # test_res <- kruskal.test(vec)
+    return(
+      list(
+        KW_statistic = test_res$statistic,
+        KW_p_value = test_res$p.value,
+        n_ctrl_asympt = dim(df[df[g_col]==1,])[1],
+        n_ctrl_sympt = dim(df[df[g_col]==2,])[1],
+        n_ew_asympt = dim(df[df[g_col]==3,])[1],
+        n_ew_sympt = dim(df[df[g_col]==4,])[1],
+        median_ctrl_asympt = median(df[df[g_col]==1, p_col]),
+        median_ctrl_sympt = median(df[df[g_col]==2, p_col]),
+        median_ew_asympt = median(df[df[g_col]==3, p_col]),
+        median_ew_sympt = median(df[df[g_col]==4, p_col])
+      )
+    )
+  }
+  jt_protein <- function(p_col, g_col, order) {
+    df <- data_symp[complete.cases(data_symp[, p_col]),]
+    test_res <- jonckheere.test(x=df[,p_col], g=as.numeric(df[,g_col]), nperm = 1000)
+    return(
+      list(
+        JT_statistic = test_res$statistic,
+        JT_p_value = test_res$p.value
+      )
+    )
+  }
+  
+  # apply tests to each protein
+  results_list_kruskal <- lapply(common_uniprot, function (p_col) {
+    kw_protein(p_col, c)
+  })
+  
+  
+  results_list_jonkheere <- lapply(common_uniprot, function (p_col) {
+    jt_protein(p_col, c)
+  })
+  
+  results_df_kruskal <- do.call(
+    rbind, lapply(results_list_kruskal, as.data.frame))
+  results_df_kruskal$KW_adj_pvalue <- p.adjust(
+    results_df_kruskal$KW_p_value, method = "BH")
+  
+  results_df_jonkheere <- do.call(
+    rbind, lapply(results_list_jonkheere, as.data.frame))
+  results_df_jonkheere$JT_adj_pvalue <- p.adjust(
+    results_df_jonkheere$JT_p_value, method = "BH")
+  
+  res_kw_jt <- cbind(results_df_kruskal, results_df_jonkheere)
+  res_kw_jt$Uniprot <- common_uniprot
+  res_kw_jt$Genes <- common_genenames
+  
+  # collect results in list of dataframes
+  c_temp <- gsub("_severity", "", clinical_symptoms_bin[i])
+  df_res_list[[c_temp]] <- res_kw_jt
+
+}
+# Export  
+write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge.xlsx")
+```
+
+with adjusted data
+
+```{r}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
 data_adj <- as.data.frame(data_adj)
 
@@ -326,5 +431,5 @@ for (i in 1:length(clinical_symptoms_bin)) {
 
 }
 # Export  
-write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis.xlsx")
+write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis_adjForSexAndAge.xlsx")
 ```
