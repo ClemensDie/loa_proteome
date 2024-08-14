@@ -6,6 +6,7 @@ images/*
 results/*
 # any html or xls, xlsx etc files.
 *.RData
+*.Rhistory
 *.png
 *.html
 *.pdf
