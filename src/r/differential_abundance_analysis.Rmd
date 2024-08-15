@@ -98,11 +98,6 @@ data_adj[data_adj$infection == "healthy controls", "infection"] <- "CTRL"
 ## Differential Expression Analysis
 
 ```{r}
-table(data["infection"])
-```
-
-
-```{r}
 setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
 design_infection <- model.matrix(~0+infection, data=data)
