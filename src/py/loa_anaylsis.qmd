@@ -1,0 +1,19 @@
+---
+title: "Analysis of the human host response to Loa Loa infection"
+authors: "Clemens Dierks, Pinkus Tober-Lau"
+orcid: 0000-0002-4560-8939
+email: clemens.dierks@charite.de 
+date: last-modified 
+format: 
+    html:
+        code-fold: true
+        code-overflow: wrap
+        code-tools: true
+        graphics: yes
+        toc: true
+        toc-location: left-body
+        toc-title: "Outline"
+        html-math-method: katex
+bibliography: references.bib
+bibliographystyle: ieee
+---
