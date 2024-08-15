@@ -79,6 +79,13 @@ RANDOM_STATE = 42
 
 ## Data Import
 
+We import two different datasets, an imputed one 
+were proteins with a missing value ratio of 
+>40% were removed and the remaining ones imported 
+with k-nearest-neighbours consisting of 
+n=242 proteins and a non-imputed dataset containing n=274 proteins.
+Furthermore, we exclude pregnant women (n=8) from the analysis.
+
 ```{python}
 data = pd.read_csv(
 	os.path.join(DATA_PATH, "preprocessed", "Preprocess_20240315_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
@@ -105,6 +112,18 @@ meta_table = pd.read_csv("results/loaloa/tables/technical_meta_table.csv", index
 ```
 
 ## Analyses
+
+As mentioned before, we conducted DEA with R's limma
+package and obtained p-values.
+
+We found n=XX proteins significantly altered between 
+LN and loa-infected patients (see Volcano plot). With most prominent up regulation 
+in XX qnd XX and downregulation in XX and XX.
+When comparing Loa severity levels, differences were
+found to be less pronounced but visible (see scatterplot).
+However, IGHG4 (P01861) showed strongest regulation between EW and MF. 
+
+
 
 ## Differential Expression Analysis
 
