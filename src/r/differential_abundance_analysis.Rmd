@@ -344,7 +344,7 @@ for (i in 1:length(clinical_symptoms_bin)) {
 write.xlsx(df_res_list, "results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge.xlsx")
 ```
 
-with adjusted data
+with adjusted data for sex and age
 
 ```{r}
 setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
