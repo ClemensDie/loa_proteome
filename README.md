@@ -4,8 +4,8 @@ This repository contains analysis scripts regarding the loa loa proteome.
 
 Colaborators:
 - Clemens Dierks
-- Pinkus Tober-lau
+- Pinkus Tober-Lau
 - Luzia Veletzky
-- Michael ramharter
+- Michael Ramharter
 - Markus Ralser
 - Florian Kurth
