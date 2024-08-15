@@ -12,3 +12,6 @@ results/*
 *.pdf
 *.xls
 *.xlsx
+*.js
+*.css
+*.woff
