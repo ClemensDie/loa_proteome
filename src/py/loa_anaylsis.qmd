@@ -14,6 +14,111 @@ format:
         toc-location: left-body
         toc-title: "Outline"
         html-math-method: katex
+
 bibliography: references.bib
 bibliographystyle: ieee
 ---
+
+## Overview
+
+In this script, we explore the plasma proteome of N = XXX loa loa infected 
+patients and loa-negative (LN) study participants. First, we provide an 
+assessementof coefficient of variation (CV) for quality control (QC) and study 
+samples.Next, we present sex and age demographics of the study population and 
+discuss the influence of eosinophils on the LN participants. Then, we import 
+analysis results from differential expression analysis (DEA) conducted in the 
+limma R package (see r/loa_analysis.Rmd). We contrasted LN vs Loa-infected 
+patients as well as for different severity levels within the loa-infected 
+patients: Patients with reported eye worm infection (EW), patients with 
+measured loa microfilaria in the blood (MF) and with both (EWMF). Furthermore, 
+we explore the associations between measured proteins and reported symptoms 
+in LN and EW patients. Since, EW infection are only 
+
+An overview of the study design is given here @Veletzky2020.
+
+An extensive introduction into Loa loa infection (or loiasis) can be found
+here @Ramharter2024.
+
+
+## Libraries
+
+```{python}
+# general imports
+import os
+import sys
+os.chdir(r"c:\\Users\\cleme\\OneDrive - Charité - Universitätsmedizin Berlin\\Projects\\02_NTD_CHARITE\\NTD")
+sys.path.append('src')
+sys.path.append('org')
+import warnings
+warnings.filterwarnings('ignore')
+
+# data manipulation
+import pandas as pd
+import numpy as np
+# plotting
+from matplotlib.colors import ListedColormap
+import matplotlib.pyplot as plt
+import seaborn as sns
+# ml & statistics
+from statsmodels.formula.api import ols
+from statsmodels.stats.multitest import fdrcorrection
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.decomposition import PCA 
+from scipy.stats import spearmanr
+from statsmodels.formula.api import ols
+from statsmodels.stats.multitest import multipletests
+
+# custom imports
+from org.org import RESULTS_PATH, DATA_PATH
+from src.utils.utils_general import create_paths, map_uniprot_multiple_genenames, flatten_list
+import src.utils.utils_uniprotAPI as uniprot
+
+RANDOM_STATE = 42
+
+```
+
+## Data Import
+
+```{python}
+data = pd.read_csv(
+	os.path.join(DATA_PATH, "preprocessed", "Preprocess_20240315_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+
+data_imp = pd.read_csv(
+	os.path.join(DATA_PATH, "preprocessed", "Preprocess_20240315_DioGenes_withoutCalCur7ves_2_min1peptides_IMP_LOA_MV04.csv"),
+	index_col=0
+)
+
+# cast loa ids to int
+data["loa_id"] = data["loa_id"].astype(int)
+
+# Load information about pregnancy and exclude pregnant women
+pregnancy_info = pd.read_csv(
+    "data/meta_clinical/20240725_luzia_ids_pregnancy.csv", 
+    index_col=0, sep=";").dropna().index
+data_imp = data_imp.loc[~data_imp["loa_id"].isin(pregnancy_info)]
+data = data.loc[~data["loa_id"].isin(pregnancy_info)]
+
+# technical meta table
+meta_table = pd.read_csv("results/loaloa/tables/technical_meta_table.csv", index_col=0)
+```
+
+## Analyses
+
+## Differential Expression Analysis
+
+```{python}
+#| label: fig-simple
+#| fig-cap: "Simple Plot"
+
+
+```
+
+## Symptom Association
+
+## Machine Learning
+
+## Parasite Peptides
+
+## References
