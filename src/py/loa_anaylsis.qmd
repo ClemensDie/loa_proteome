@@ -98,7 +98,7 @@ data_imp = pd.read_csv(
 )
 
 # cast loa ids to int
-data["loa_id"] = data["loa_id"].astype(int)
+# data["loa_id"] = data["loa_id"].astype(int)
 
 # Load information about pregnancy and exclude pregnant women
 pregnancy_info = pd.read_csv(
@@ -109,6 +109,136 @@ data = data.loc[~data["loa_id"].isin(pregnancy_info)]
 
 # technical meta table
 meta_table = pd.read_csv("results/loaloa/tables/technical_meta_table.csv", index_col=0)
+
+```
+
+
+
+```{python}
+
+# Rename controls to loa-negative
+data["infection"] = data["infection"].replace({"healthy controls":"LN"})
+data["disease severity"] = data["disease severity"].replace({"healthy control":"LN"})
+
+
+# Select blood counts and clinical symptoms from meta data
+clinical_symptoms = list(data.columns[52:82])
+# relative blood counts are reported in %, abs. eos, lym, bas, neu in [x10^3 / µL], hb [mg/dl]
+blood_counts = list(data.columns[40:52]) + ["NLR", "BLR", "ELR", "MLR"]
+
+data[clinical_symptoms] = data[clinical_symptoms].replace({9, np.nan})
+
+# Calculate common full blood counts ratios, such as NLR, BLR, ELR, MLR 
+data["NLR"] = data["neu_abs"]/data["lym_abs"]
+data["BLR"] = data["bas_abs"]/data["lym_abs"]
+data["ELR"] = data["eos_abs"]/data["lym_abs"]
+data["MLR"] = data["mon_abs"]/data["lym_abs"]
+```
+
+```{python}
+# Calculate log2 loa mf count 
+data["ll_mf"].replace({0:np.nan}, inplace=True)
+data["ll_mf_log2"] = np.log2(data["ll_mf"]+1)
+
+# add threshold for eos (see CERMEL Guideline)
+data["eos_high13"] = ["1" if x > 1.3 else "0" for x in data["eos_abs"]]
+```
+
+```{python}
+# add infection column
+data["infection"] = "monoinfection"
+
+data["mp_mfc"] = data["mp_mfc"].fillna("0")
+data["mp_tbsbyml"] = data["mp_tbsbyml"].fillna(0)
+
+data["infection"].loc[data[(data["group"] == "loa")             & (data["co-infection 1"].notna()) & (data["co-infection 2"].isna()) & (data["co-infection 3"].isna())].index] = "mansonella coinf"
+data["infection"].loc[data[(data["group"] == "loa")             & (data["co-infection 1"].isna()) & (data["co-infection 2"].notna()) & (data["co-infection 3"].isna())].index] = "malaria coinf"
+data["infection"].loc[data[(data["group"] == "loa")             & (data["co-infection 1"].notna()) & (data["co-infection 2"].notna()) & (data["co-infection 3"].isna())].index] = "mansonella & malaria coinf"
+data["infection"].loc[data[(data["group"] == "mansonella")      & (data["co-infection 1"].isna()) & (data["co-infection 2"].isna()) & (data["co-infection 3"].isna())].index] = "mansonella"
+data["infection"].loc[data[(data["group"] == "loa")             & (data["co-infection 1"].isna()) & (data["co-infection 2"].isna()) & (data["co-infection 3"].isna()) & (data["mp_tbsbyml"] == 0) & (data["mp_mfc"]== "0")].index] = "loa"
+data["infection"].loc[data[(data["group"] == "malaria")         & (data["co-infection 1"].isna()) & (data["co-infection 2"].isna()) & (data["co-infection 3"].isna())].index] = "malaria"
+data["infection"].loc[data[(data["group"] == "healthy control") & (data["co-infection 1"].isna()) & (data["co-infection 2"].isna()) & (data["co-infection 3"].isna())].index] = "LN"
+
+# Select all coninfection data
+malaria_coinf_data = data[data["infection"]=="malaria coinf"]
+mans_coinf_data = data[data["infection"]=="mansonella coinf"]
+```
+
+```{python}
+# Insert Columns for symptoms
+for cs in clinical_symptoms:
+    data[f"{cs}_severity"] = data["disease severity"] + "_" + data[cs].astype(str)
+    data[f"{cs}_severity"].replace(
+    {
+        "EW_0.0": "EW asympt.",
+        "EW_1.0": "EW sympt.",
+        "EWMF_0.0": "EWMF sympt.",
+        "EWMF_1.0": "EWMF sympt.",
+        "MF_1.0": "MF sympt.",
+        "MF_0.0": "MF asympt.",
+        "LN_0.0": "LN asympt.",
+        "LN_1.0": "LN sympt."
+    }, inplace=True)
+```
+
+
+```{python}
+# overlapping proteins/genes 
+common_proteins = meta_table.index
+common_proteins_imp = list(set(data_imp.columns) & set(meta_table.index))
+
+# Update imputed columns
+meta_cols = list(set(data.columns).difference(common_proteins_imp))
+data_imp = data_imp.loc[data.index]
+
+data_imp = pd.concat([data[meta_cols], data_imp[common_proteins_imp]], axis=1)
+```
+
+```{python}
+fig, ax = plt.subplots(1,1)
+sns.boxplot(data=data,
+            y="eos_abs", 
+            x="disease severity",
+            order=["LN", "EW", "EWMF", "MF", "HYMF"],
+            ax=ax, fill=False, hue="disease severity", fliersize=0, legend=False
+            )
+sns.stripplot(data=data,
+            y="eos_abs", 
+            x="disease severity",
+            order=["LN", "EW", "EWMF", "MF", "HYMF"],
+            ax=ax,hue="disease severity", alpha=0.5, linewidth=1, edgecolor="k"
+            )
+plt.ylim([0,10])
+plt.ylabel("abs. eosinophil count")
+plt.grid()
+plt.legend(loc="upper left")
+plt.savefig("results/loaloa/manuscript/supplement/loa_eos_count.png", dpi=200)
+```
+
+
+```{python}
+# remove all healthy controls with and absolute eosinophil count > 1.3
+data = data.drop(data[(data["eos_high13"] == "1") & (data["disease severity"] == "LN")].index)
+
+data.loc[(data["infection"]=="loa") & (data["raploa"]==1) & (data["disease severity"]=="MF"), "disease severity"] = "EWMF"
+
+# Add hyper microfilarial samples to MF group since threshold was chosen 
+# very low.
+data["disease severity"] = data["disease severity"].replace({"HYMF":"MF"})
+
+
+# Export data
+data.to_csv("data/analysis/loa/loa_data.csv", index=False)
+data_imp = data_imp.loc[data.index]
+data_imp.to_csv("data/analysis/loa/loa_data_imp.csv", index=False)
+# data_adj.to_csv("data/analysis/loa/loa_data_adj.csv", index=False)
+
+data_imp["disease severity"] = data_imp["disease severity"].replace({"HYMF":"MF"})
+```
+
+```{python}
+res_path_plots = "results/loaloa/plots"
+res_path_tables = "results/loaloa/tables"
 ```
 
 ## Analyses
@@ -116,26 +246,255 @@ meta_table = pd.read_csv("results/loaloa/tables/technical_meta_table.csv", index
 As mentioned before, we conducted DEA with R's limma
 package and obtained p-values.
 
-We found n=XX proteins significantly altered between 
+We found n=44 proteins significantly altered between 
 LN and loa-infected patients (see Volcano plot). With most prominent up regulation 
-in XX qnd XX and downregulation in XX and XX.
-When comparing Loa severity levels, differences were
-found to be less pronounced but visible (see scatterplot).
+in IGHG4 (P01861) qnd IGHG3 (P01860). When comparing Loa severity levels, 
+differences were found to be less pronounced but still significant (see scatterplot).
 However, IGHG4 (P01861) showed strongest regulation between EW and MF. 
 
 
 
 ## Differential Expression Analysis
 
-```{python}
-#| label: fig-simple
-#| fig-cap: "Simple Plot"
 
-
-```
 
 ## Symptom Association
 
+```{python}
+# Analysis was performed in R (differential_abundance_analysis.rmd)
+# Loading results and cleaning up columns
+
+fp_analysis = "results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge.xlsx"
+
+res_cont_dict = {
+    c:pd.read_excel(fp_analysis, sheet_name=c) for c in clinical_symptoms
+}
+
+for c in res_cont_dict.keys():
+    df = res_cont_dict[c]
+    # reorder columns 
+    df = df[[
+        "Uniprot", "Genes", 
+        "KW_statistic", "KW_p_value", "KW_adj_pvalue", 
+        "JT_statistic", "JT_p_value", "JT_adj_pvalue",
+        "median_ln_asympt", "median_ln_sympt", 
+        "median_ew_asympt", "median_ew_sympt",
+        "n_ln_asympt", "n_ln_sympt", "n_ew_asympt", "n_ew_sympt"
+        ]]
+
+    # check which symptoms and protiens have less than 10 samples in 
+    # one of the groups and assign nan values
+    idx_low_samples = (
+        (
+            df[["n_ln_asympt", "n_ln_sympt", "n_ew_asympt", "n_ew_sympt"]] < 10
+            ).sum(axis=1) > 0
+        )
+    df.iloc[idx_low_samples, 2:12] = np.nan
+    df["JT_adj_pvalue"] = np.nan
+    df["KW_adj_pvalue"] = np.nan
+    
+    non_na_mask = ~np.isnan(df["KW_p_value"])
+    if np.sum(non_na_mask) > 0:
+    # perform bonferroni adjustment
+        df.loc[non_na_mask, "JT_adj_pvalue"] = multipletests(df.loc[non_na_mask, "JT_p_value"], method="fdr_bh")[1]
+        df.loc[non_na_mask, "KW_adj_pvalue"] = multipletests(df.loc[non_na_mask, "KW_p_value"], method="fdr_bh")[1]
+    df = df.set_index("Uniprot")
+    res_cont_dict[c] = df
+```
+
+```{python}
+# calculate number of significant assocaitions 
+n_signif_kw = [sum(res_cont_dict[c]["KW_adj_pvalue"] <= 0.05) for c in clinical_symptoms]
+n_signif_jt = [sum(res_cont_dict[c]["JT_adj_pvalue"] <= 0.05) for c in clinical_symptoms]
+
+```
+
+```{python}
+symptoms_label_dict = {
+    'pru_history':      "Pruritus History",
+    'pru_consultation': "Pruritus Consultation",
+    'pru_distribution': "Pruritus Distribution",
+    'pru_sleep':        "Pruritus Sleep",
+    'pru_work':         "Pruritus Work",
+    'pru_psychologicaldistress': "Pruritus Psych. Stress",
+    'mya_history':      "Myalgia History",
+    'mya_consultation': "Myalgia Consultation",
+    'mya_sleep':        "Myalgia Sleep",
+    'mya_work':         "Myalgia Work",
+    'mya_psychologicaldistress': "Myalgia Psych. Stress",
+    'art_history': "Arthralgia History",
+    'art_consultation': "Arthralgia Consultation",
+    'art_sleep': "Arthralgia Sleep",
+    'art_work': "Arthralgia Work",
+    'art_psychologicaldistress': "Arthralgia Psych. Stress",
+    'cs_history': "Calabar Sweelling History",
+    'cs_lastyear': "Calabar Sweelling Last Year",
+    'cs_consultation': "Calabar Sweelling Consultation",
+    'raploa': "RAPLOA",
+    'rl_lastyear': "RAPLOA Last Year",
+    'urticaria': "Urticaria",
+    'urt_sleep': "Urticaria Sleep",
+    'swelling': "Random Swelling",
+    'sw_sleep': "Random Swelling Sleep",
+    'sw_work': "Random Swelling Work",
+    'fatigue': "Fatigue",
+    'paralysis': "Paralysis",
+    'paresthesia': "Paresthesia",
+    'headache': "Headache"
+    }
+```
+
+```{python}
+## Heatmap
+
+# rows proteins
+# cols symptoms
+diff_df = pd.DataFrame()
+signif_df = pd.DataFrame()
+
+signif_prot = []
+
+# Iterate over symptoms
+for s in res_cont_dict.keys():
+    # select symptom
+    df_sympt = res_cont_dict[s]
+    # calculate difference
+    diff =  df_sympt["median_ew_sympt"] - df_sympt["median_ln_asympt"]
+    # check for significant proteins
+    signif = df_sympt["JT_adj_pvalue"] <= 0.05
+    diff_df[s] = diff
+    signif_df[s] = signif
+    # if signif proteins were found add tehm to list
+    if signif.sum() >0:
+        signif_prot.append(df_sympt[df_sympt["JT_adj_pvalue"] <= 0.05].index)
+signif_prot_lst = list(set(np.concatenate(signif_prot)))
+
+diff_df.columns = res_cont_dict.keys()
+signif_df.columns = res_cont_dict.keys()
+diff_df.index = df_sympt.index
+signif_df.index = df_sympt.index
+
+diff_df = diff_df.loc[signif_prot_lst]
+signif_df = signif_df.loc[signif_prot_lst]
+
+
+drop_symptoms=[
+    "pru_history", "pru_consultation", "pru_distribution", 
+    "pru_sleep", "pru_work", "pru_psychologicaldistress",
+    "mya_consultation", "cs_lastyear", "cs_consultation",
+    "raploa", "rl_lastyear", "urticaria", "urt_sleep", 
+    "sw_sleep", "sw_work",
+]
+
+drop_proteins = ["GSN", "MASP1", "FBLN1"]
+
+diff_df = diff_df.drop(drop_symptoms, axis=1).T
+signif_df = signif_df.drop(drop_symptoms, axis=1).T
+g = sns.clustermap(
+    diff_df.fillna(0), 
+    center=0, vmin=-1.2, vmax=1.2, cmap="vlag", 
+    col_cluster=True, row_cluster=False,
+    dendrogram_ratio=0.05, linewidths=.5,
+    cbar_pos=[0.0, 0.53, 0.01, 0.4],
+    annot=signif_df.replace({True:"*", False:""}),
+    fmt="", annot_kws={"ha":"center", "va":"center"}, 
+    figsize=(28,6),
+    mask=diff_df.isna(),
+    yticklabels=[symptoms_label_dict[c] for c in diff_df.index])
+for _, spine in g.ax_heatmap.spines.items():
+    spine.set_visible(True)
+g.ax_heatmap.set_facecolor('gray')
+g.ax_heatmap.set_xlabel("Associated Proteins", fontweight='bold')
+yticklabels = []
+for label in g.ax_heatmap.get_xticklabels():
+    yticklabels.append(
+        meta_table.loc[label.get_text(), "Gene Names"].split(" ")[0]
+    )
+g.ax_heatmap.set_xticklabels(yticklabels)
+g.ax_heatmap.set_ylabel("Reported Symptoms" , fontweight='bold')
+cbar = g.ax_heatmap.collections[0].colorbar
+cbar.set_label('log2 FC', weight='bold')
+plt.savefig(
+    os.path.join(res_path_plots, "symptoms", "continuum_ln_ew"),
+    dpi=400
+    )
+```
+
+```{python}
+path_res_stat_cont = os.path.join(
+    res_path_tables, "sympt_stat_analysis_comb_unadj.xlsx"
+)
+with pd.ExcelWriter(path_res_stat_cont) as writer:
+    for k in res_cont_dict.keys():
+        sn = symptoms_label_dict[k]
+        st = res_cont_dict[k]
+        # st.set_index("Uniprot", inplace=True)
+        st.to_excel(writer, sheet_name=sn, index=True)
+```
+Next, we plot boxplots for the different proteins.
+```{python}
+def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
+            mapped_t = meta_table.loc[t, "Gene Names"].split(" ")[0]
+            if mapped_t == "":
+                mapped_t = t
+            levels = ["LN asympt.", "LN sympt.",  "EW asympt." ,"EW sympt."]
+            x_labels = ["LN asympt.", "LN sympt.",  "EW asympt." ,"EW sympt."]
+            colors = [sns.color_palette("Blues_r")[0],
+                    sns.color_palette("Blues_r")[2],
+                    sns.color_palette("Reds")[2],
+                    sns.color_palette("Reds_r")[0],
+                    ]
+                
+            df_plot = data[data[f"{c}_severity"].isin(levels)]
+            fig , ax = plt.subplots(1,1, figsize=(5,4))
+            sns.boxplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels,
+                fliersize=0, palette=colors, fill=False)
+            sns.stripplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels, 
+                palette=colors, edgecolor="k", linewidth=1, alpha=.4)
+            ax.set_xticklabels(x_labels, fontdict={"weight":"bold"})
+            ax.set_xlabel(symptoms_label_dict[c],  fontdict={"weight":"bold"})
+            p_jt = res_cont_dict[c].loc[
+                res_cont_dict[c].index==t, "JT_adj_pvalue"].values[0]
+            if add_info == "_adj":
+                ax.set_ylabel(
+                       f"adj. $log_2$ {mapped_t} abundance", 
+                       fontdict={"weight":"bold"})
+            else:
+                ax.set_ylabel(
+                      f"$log_2$ {mapped_t} abundance", 
+                      fontdict={"weight":"bold"})
+            ax.set_title(
+                  "$p_{jt}$: "+f"{p_jt:.2f}",
+                        fontdict={"weight":"bold"})
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(save_path, f"{c}_{mapped_t}{add_info}.png"),
+                  dpi=300)
+            plt.close()
+```
+
+```{python}
+path_cont_boxplots= os.path.join(res_path_plots, "symptoms/continuum_ln_ew")
+data_mono = data[((data["infection"].isin(["loa", "LN"])) & (data["disease severity"].isin(["EW", "LN"])))]
+for c in signif_df.index:
+    for t in signif_df.columns:
+        
+        if signif_df.loc[c, t]:
+            plot_cont_sympt(
+                data_mono, res_cont_dict, c, t, path_cont_boxplots)
+```
+
+```{python}
+c="paralysis"
+t = "P13796"
+plot_cont_sympt(
+    data, res_cont_dict, c, t, path_cont_boxplots)
+
+
+```
 ## Machine Learning
 
 ## Parasite Peptides
