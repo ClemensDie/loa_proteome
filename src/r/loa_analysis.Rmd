@@ -84,8 +84,8 @@ data_adj[, common_uniprot] <- as.data.frame(sapply(data_adj[, common_uniprot], a
 data <- data[(data$infection=="loa") | (data$infection=="LN"), ]
 data_adj <- data[(data_adj$infection=="loa") | (data_adj$infection=="LN"), ]
 
-data <- data[which((data$eos_abs < 0.5 & data$`disease severity` == "LN") | data$`disease severity` != "LN"), ]
-data_adj <- data_adj[which((data_adj$eos_abs < 0.5 & data_adj$`disease severity` == "LN") | data_adj$`disease severity` != "LN"), ]
+data <- data[which((data$eos_abs < 1.3 & data$`disease severity` == "LN") | data$`disease severity` != "LN"), ]
+data_adj <- data_adj[which((data_adj$eos_abs < 1.3 & data_adj$`disease severity` == "LN") | data_adj$`disease severity` != "LN"), ]
 
 data$disease_severity <- data$`disease severity`
 ```
