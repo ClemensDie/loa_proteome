@@ -2,7 +2,7 @@
 
 This repository contains analysis scripts regarding the loa loa proteome.
 
-Colaborators:
+Authors:
 - Clemens Dierks
 - Pinkus Tober-Lau
 - Luzia Veletzky
