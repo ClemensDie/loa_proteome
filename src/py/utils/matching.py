@@ -53,7 +53,7 @@ def inspect_matching(
         n_left_g1.append(selected_samples_1.shape[0])
         n_left_g2.append(selected_samples_2.shape[0])
         total_costs.append(
-            pd.DataFrame(tp_lnInf).iloc[
+            pd.DataFrame(transport_plan).iloc[
                 np.unique(significant_samples_left[:,0]), 
                 np.unique(significant_samples_left[:,1])].sum().sum()
                 )
