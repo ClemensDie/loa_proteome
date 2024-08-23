@@ -32,26 +32,42 @@ EW symptomatic.
 
 Subsequent analysis will be carried out in Python.
 
-## Imports
+## Libraries
+
+```{r}
+# Installs
+# install.packages("BiocManager")
+# library(BiocManager)
+# BiocManager::install("limma")
+# install.packages("MatchIt")
+# install.packages("clinfun")
+# install.packages("dplyr")
+# install.packages("ggplot2")
+# install.packages("openxlsx")
+# install.packages("writexl")
+# install.packages("CBPS")
+# install.packages("knitr")
+# install.packages("twang")
+
+```
+
 
 ```{r setup warning = FALSE}
 library(limma)
 library(stringr)
 library(MatchIt)
-library(edgeR)
-library(org.Hs.eg.db)
-library(DOSE) # disease ontologyn
 library(clinfun)
 library(dplyr)
 library(ggplot2)
 library(openxlsx)
 library(writexl)
+library(CBPS)
+library(twang)
 
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 knitr::opts_knit$set(root.dir =  "C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 ```
-
 
 
 ## Data Import
@@ -85,7 +101,7 @@ data[, common_uniprot] <- as.data.frame(sapply(data[, common_uniprot], as.numeri
 
 data$disease_severity <- data$`disease severity`
 
-# data$infection
+# Sex: 0=Women, 1=Men
 
 ```
 
@@ -103,110 +119,475 @@ We match the larger INF group to the smaller LN group.
 
 3: MF vs LN (1), EWMF vs LN (2), EWMF vs LN (3)
 
-4: Women vs Men in MF, LN, EW (EWMF already perfectly balanced)  only age group matching
+4: Men vs Women in MF, LN, EW (EWMF already perfectly balanced)  only age group matching
 
 ```{r warning = FALSE}
-
-##1 
-data_m <- data
-
-data_m$age_group <- as.numeric(as.factor(data_m$age_group))
-data_m$sex <- as.numeric(as.factor(data_m$sex))
-
-data_m$infection <- ifelse(data_m_1$infection == "LN", 1, 0)
-
-
-# data_m_1$infection <- as.numeric(as.factor(data_m_1$infection))-1
-
-m <- matchit(
-  infection ~ age_group + sex, data = data_m_1, method = "nearest", ratio=1
-)
-
-data_matched <- match.data(m)
-data_matched$infection <- ifelse(data_matched$infection == 1, "LN", "INF")
-
-# hist(as.numeric(data_m$age_group))
-ggplot(data, aes(x = infection, fill = factor(age_group))) +
-  geom_histogram(stat = "count", position = "fill", color = "black") +
-  labs(title = "Histogram of Age Groups by Infection Status", 
-       main = "Before Matching",
-       x = "Age Groups", 
-       y = "Frequency", 
-       fill = "Infection Status") +
-  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
-  theme_minimal()
-ggplot(data_matched, aes(x = infection, fill = factor(age_group))) +
-  geom_histogram(stat = "count", position = "fill", color = "black") +
-  labs(title = "Histogram of Age Groups by Infection Status", 
-       main = "After Matching",
-       x = "Age Groups", 
-       y = "Frequency", 
-       fill = "Infection Status") +
-  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
-  theme_minimal()
-```
- 
- Next, we match between the severity groups
-
-```{r warning = FALSE}
-## 2
-data_m <- data
-
-data_m$age_group <- as.numeric(as.factor(data_m$age_group))
-data_m$sex <- as.numeric(as.factor(data_m$sex))
-
-data_m$infection <- ifelse(data_m_1$infection == "LN", 1, 0)
-
-
-# data_m_1$infection <- as.numeric(as.factor(data_m_1$infection))-1
-
-m <- matchit(
-  infection ~ age_group + sex, data = data_m_1, method = "nearest", ratio=1
-)
-
-data_matched <- match.data(m)
-data_matched$infection <- ifelse(data_matched$infection == 1, "LN", "INF")
-
-# hist(as.numeric(data_m$age_group))
-ggplot(data, aes(x = infection, fill = factor(age_group))) +
-  geom_histogram(stat = "count", position = "fill", color = "black") +
-  labs(title = "Histogram of Age Groups by Infection Status", 
-       main = "Before Matching",
-       x = "Age Groups", 
-       y = "Frequency", 
-       fill = "Infection Status") +
-  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
-  theme_minimal()
-ggplot(data_matched, aes(x = infection, fill = factor(age_group))) +
-  geom_histogram(stat = "count", position = "fill", color = "black") +
-  labs(title = "Histogram of Age Groups by Infection Status", 
-       main = "After Matching",
-       x = "Age Groups", 
-       y = "Frequency", 
-       fill = "Infection Status") +
-  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
-  theme_minimal()
-```
-## Differential Expression Analysis
-
-```{r}
 setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
-data$infection
+data_m <- data
 
-design_infection <- model.matrix(~0+infection, data=data)
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$infection <- ifelse(data_m$infection == "LN", 1, 0)
+
+
+m <- matchit(
+  infection ~ age_group , data = data_m, method = "nearest", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$infection <- ifelse(data_matched$infection == 1, "LN", "INF")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_ln_inf <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_inf_ln.csv")
+```
+ 
+ Next, we match between the severity groups. We start with MF vs EW, ..
+ 
+
+```{r warning = FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("MF", "EW"))
+
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+data_m$disease_severity <- ifelse(data_m$disease_severity == "MF", 1, 0)
+
+m <- matchit(
+  disease_severity ~ sex, data = data_m, method = "nearest", ratio=1
+)
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "MF", "EW")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_mf_ew <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_mf_ew.csv")
+```
+
+... followed by MF and EWMF ...
+
+
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("MF", "EWMF"))
+table(data_m$disease_severity)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+data_m$disease_severity <- ifelse(data_m$disease_severity == "MF", 1, 0)
+
+m <- matchit(
+  disease_severity ~ age_group + sex, data = data_m, method = "nearest", ratio=1
+)
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "MF", "EWMF")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_mf_ewmf <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_mf_ewmf.csv")
+```
+... followed by MF and EWMF ...
+
+
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("EW", "EWMF"))
+table(data_m$disease_severity)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+data_m$disease_severity <- ifelse(data_m$disease_severity == "EWMF", 1, 0)
+
+m <- matchit(
+  disease_severity ~ age_group + sex, data = data_m, method = "nearest", ratio=1
+)
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "EWMF", "EW")
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_ew_ewmf <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_ew_ewmf.csv")
+```
+
+Since we are comparing symptomatic to asymptomatic LN and EW, 
+we investigated differences in age_group and sex distributions. Since
+some of the symptoms have very small sample sizes and distribution do not 
+show big differences, we don't balance the contrast.
+
+
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("EW", "LN"))
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "EW", "LN")
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+```
+
+
+
+Finally, we balance age within the severity groups to analyse whether 
+whether there are immunological differences between men and women for 
+EW or MF.
+
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("MF"))
+table(data_m$age_group, data_m$sex)
+
+data_m$sex <- ifelse(data_m$sex == 0, 1, 0)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+
+m <- matchit(
+  sex ~ age_group, data = data_m, method = "nearest", ratio=2
+)
+
+data_matched <- match.data(m)
+data_matched$sex <- ifelse(data_matched$sex == 0, 1, 0)
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
+data_mf_sex <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_mf_sex.csv")
+```
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("EWMF"))
+table(data_m$age_group, data_m$sex)
+
+data_m$sex <- ifelse(data_m$sex == 1, 0, 1)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+
+m <- matchit(
+  sex ~ age_group, data = data_m, method = "nearest", ratio=2
+)
+
+data_matched <- match.data(m)
+data_matched$sex <- ifelse(data_matched$sex == 1, 0, 1)
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_m$sex <- ifelse(data_m$sex == 0, "Women", "Men")
+
+data_ewmf_sex <- data_m
+# write.csv(data_matched, "data/analysis/loa/matched/data_matched_ewmf_sex.csv")
+```
+Since Balancding does not lead to closer distributions, we do not match the age 
+groups in the EWMF group.
+
+
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("EW"))
+table(data_m$age_group, data_m$sex)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+
+m <- matchit(
+  sex ~ age_group, data = data_m, method = "nearest", ratio=2
+)
+
+data_matched <- match.data(m)
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
+data_ew_sex <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_ew_sex.csv")
+```
+Finally, we match age groups within the 
+
+```{r}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("LN"))
+table(data_m$age_group, data_m$sex)
+
+data_m$sex <- ifelse(data_m$sex == 0, 1, 0)
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+
+m <- matchit(
+  sex ~ age_group, data = data_m, method = "optimal", ratio=2
+)
+
+data_matched <- match.data(m)
+data_matched$sex <- ifelse(data_matched$sex == 0, 1, 0)
+
+# hist(as.numeric(data_m$age_group))
+ggplot(data_m, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = sex, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "sex", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+
+# Export data
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
+data_ln_sex <- data_matched
+write.csv(data_matched, "data/analysis/loa/matched/data_matched_ln_sex.csv")
+```
+
+
+## Differential Expression Analysis
+
+Furthermore we conduct a differential expression analyis for the following 
+contrasts:
+
+LN vs INF
+MF vs EW
+MF vs EWMF
+EW vs EWMF
+
+Men vs Women in LN
+Men vs Women in MS
+Men vs Women in EW
+Men vs Women in EWMF
+
+
+### LN vs INF
+
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+design_infection <- model.matrix(~0+infection, data=data_ln_inf)
 colnames(design_infection) <- gsub("infection", "", colnames(design_infection))
-design_infection <- design_infection[,c("LN", "loa")]
+design_infection <- design_infection[,c("LN", "INF")]
 
-# 
-# common_uniprot <- colnames(data)[99:345]
-
-data[,colnames(data) %in% common_uniprot] <- as.data.frame(sapply(data[colnames(data) %in% common_uniprot], as.numeric))
-fit_infection <- lmFit(t(data[,colnames(data) %in% common_uniprot]), design = design_infection)
-colnames(fit_infection$coefficients)
+data_ln_inf[,colnames(data_ln_inf) %in% common_uniprot] <- as.data.frame(
+  sapply(data_ln_inf[colnames(data_ln_inf) %in% common_uniprot], as.numeric))
+fit_infection <- lmFit(
+  t(data_ln_inf[,colnames(data_ln_inf) %in% common_uniprot]), 
+  design = design_infection)
 
 cont.matrix_infection <- makeContrasts(
-  loa-LN,
+  INF-LN,
   levels=design_infection)
 
 fit2_infection <- contrasts.fit(fit_infection, cont.matrix_infection)
@@ -218,80 +599,82 @@ rownames(protein_map) <- protein_map$Protein.Group
 res_infection$genes <- protein_map[row.names(res_infection), "Genes"]
 
 write.csv(res_infection, "results/loaloa/tables/dea_limma/ln_infected.csv")
-
-plot(res_infection$logFC, -log10(res_infection$P.Value))
-plot(res_infection$logFC, -log10(res_infection$adj.P.Val))
 ```
+### Severity Groups
+
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
 
+data_mf_ew$disease_severity <- as.factor(data_mf_ew$disease_severity)
+design <- model.matrix(~0+disease_severity, data=data_mf_ew)
+colnames(design) <- sub("disease_severity", "", colnames(design))
+colnames(design) <- sub(":", "_", colnames(design))
 
-############ 
+data_mf_ew[,colnames(data_mf_ew) %in% common_uniprot] <- as.data.frame(sapply(data_mf_ew[,colnames(data_mf_ew) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_mf_ew[,colnames(data_mf_ew) %in% common_uniprot]), design = design)
 
-```{r}
+# table(data_mf_ew$disease_severity)
+
+
+# Define contrasts
+cont.matrix <- makeContrasts(
+  MF-EW,
+  levels=design)
+
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit3 <- eBayes(fit2, trend = T, robust = T)
+
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/mf_ew.csv")
+```
+```{r warning=FALSE}
 ### Severity Groups
 setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
 
-data$disease_severity <- as.factor(data$disease_severity)
-design <- model.matrix(~0+disease_severity, data=data)
+data_mf_ewmf$disease_severity <- as.factor(data_mf_ewmf$disease_severity)
+design <- model.matrix(~0+disease_severity, data=data_mf_ewmf)
 colnames(design) <- sub("disease_severity", "", colnames(design))
 colnames(design) <- sub(":", "_", colnames(design))
 
-#change uniprot ids to gene names
-# drop columns with non mappable column name
-# data <- data[, !colnames(data) == "", drop=FALSE]
-data[,colnames(data) %in% common_uniprot] <- as.data.frame(sapply(data[,colnames(data) %in% common_uniprot], as.numeric))
-fit <- lmFit(t(data[,colnames(data) %in% common_uniprot]), design = design)
+data_mf_ewmf[,colnames(data_mf_ewmf) %in% common_uniprot] <- as.data.frame(sapply(data_mf_ewmf[,colnames(data_mf_ewmf) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_mf_ewmf[,colnames(data_mf_ewmf) %in% common_uniprot]), design = design)
 
-table(data$disease_severity)
+# table(data_mf_ewmf$disease_severity)
 
 
 # Define contrasts
 cont.matrix <- makeContrasts(
-  MF-EW,
   MF-EWMF,
-  EW-EWMF,
   levels=design)
 
 
 fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
-res_mf_ew <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
-res_mf_ewmf <- topTable(fit3, n=Inf, adjust="BH", coef = 2)
-res_ew_ewmf <- topTable(fit3, n=Inf, adjust="BH", coef = 3)
-
-res_mf_ew$genes <- protein_map[row.names(res_mf_ew), "Genes"]
-res_mf_ewmf$genes <- protein_map[row.names(res_mf_ewmf), "Genes"]
-res_ew_ewmf$genes <- protein_map[row.names(res_ew_ewmf), "Genes"]
-
-write.csv(res_mf_ew, "results/loaloa/tables/dea_limma/mf_ew.csv")
-write.csv(res_mf_ewmf, "results/loaloa/tables/dea_limma/mf_ewmf.csv")
-write.csv(res_ew_ewmf, "results/loaloa/tables/dea_limma/ew_ewmf.csv")
-
-
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/mf_ewmf.csv")
 ```
-
-
-
-
-```{r}
-## only with data with raploa 1 year
+```{r warning=FALSE}
+### Severity Groups
 setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
-data_rl <- data[((data$disease_severity == "EW") & (data$rl_lastyear == 1)) | ((data$disease_severity == "EWMF") & (data$rl_lastyear == 1)) | (data$disease_severity == "MF"),]
 
-design <- model.matrix(~0+disease_severity, data=data_rl)
+data_ew_ewmf$disease_severity <- as.factor(data_ew_ewmf$disease_severity)
+design <- model.matrix(~0+disease_severity, data=data_ew_ewmf)
 colnames(design) <- sub("disease_severity", "", colnames(design))
-fit <- lmFit(t(data_rl[,colnames(data_rl) %in% common_uniprot]), design = design)
+colnames(design) <- sub(":", "_", colnames(design))
 
+data_ew_ewmf[,colnames(data_ew_ewmf) %in% common_uniprot] <- as.data.frame(sapply(data_ew_ewmf[,colnames(data_ew_ewmf) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_ew_ewmf[,colnames(data_ew_ewmf) %in% common_uniprot]), design = design)
 
-table(data_rl$disease_severity)
+# table(data_ew_ewmf$disease_severity)
+
 
 # Define contrasts
 cont.matrix <- makeContrasts(
-  MF-EW,
-  MF-EWMF,
   EW-EWMF,
   levels=design)
 
@@ -299,26 +682,130 @@ cont.matrix <- makeContrasts(
 fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
-res_mf_ew_rl <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
-res_mf_ewmf_rl <- topTable(fit3, n=Inf, adjust="BH", coef = 2)
-res_ew_ewmf_rl <- topTable(fit3, n=Inf, adjust="BH", coef = 3)
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/ew_ewmf.csv")
+```
+### Analysis of immunological differences in Men and Women
 
-res_mf_ew_rl$genes <- protein_map[row.names(res_mf_ew_rl), "Genes"]
-res_mf_ewmf_rl$genes <- protein_map[row.names(res_mf_ewmf_rl), "Genes"]
-res_ew_ewmf_rl$genes <- protein_map[row.names(res_ew_ewmf_rl), "Genes"]
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
 
-write.csv(res_mf_ew_rl, "results/loaloa/tables/dea_limma/mf_ew_rl.csv")
-write.csv(res_mf_ewmf_rl, "results/loaloa/tables/dea_limma/mf_ewmf_rl.csv")
-write.csv(res_ew_ewmf_rl, "results/loaloa/tables/dea_limma/ew_ewmf_rl.csv")
 
-plot(res_mf_ew_rl$logFC, -log10(res_mf_ew_rl$P.Value))
-plot(res_mf_ewmf_rl$logFC, -log10(res_mf_ew_rl$P.Value))
-plot(res_ew_ewmf_rl$logFC, -log10(res_mf_ew_rl$P.Value))
+data_mf_sex$sex <- as.factor(data_mf_sex$sex)
+design <- model.matrix(~0+sex, data=data_mf_sex)
+colnames(design) <- sub("sex", "", colnames(design))
+colnames(design) <- sub(":", "_", colnames(design))
+colnames(design) <- sub(0, "Women" , colnames(design))
+colnames(design) <- sub(1, "Men" , colnames(design))
 
-plot(res_mf_ew_rl$logFC, -log10(res_mf_ew_rl$adj.P.Val))
-plot(res_mf_ewmf_rl$logFC, -log10(res_mf_ewmf_rl$adj.P.Val))
-plot(res_ew_ewmf_rl$logFC, -log10(res_ew_ewmf_rl$adj.P.Val))
 
+data_mf_sex[,colnames(data_mf_sex) %in% common_uniprot] <- as.data.frame(sapply(data_mf_sex[,colnames(data_mf_sex) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_mf_sex[,colnames(data_mf_sex) %in% common_uniprot]), design = design)
+
+# table(data_mf_sex$sex)
+
+
+# Define contrasts
+cont.matrix <- makeContrasts(
+  Women-Men,
+  levels=design)
+
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit3 <- eBayes(fit2, trend = T, robust = T)
+
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/mf_sex.csv")
+```
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+
+data_ewmf_sex$sex <- as.factor(data_ewmf_sex$sex)
+design <- model.matrix(~0+sex, data=data_ewmf_sex)
+colnames(design) <- sub("sex", "", colnames(design))
+colnames(design) <- sub(":", "_", colnames(design))
+colnames(design) <- sub(0, "Women" , colnames(design))
+colnames(design) <- sub(1, "Men" , colnames(design))
+
+
+data_ewmf_sex[,colnames(data_ewmf_sex) %in% common_uniprot] <- as.data.frame(sapply(data_ewmf_sex[,colnames(data_ewmf_sex) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_ewmf_sex[,colnames(data_ewmf_sex) %in% common_uniprot]), design = design)
+
+# table(data_ewmf_sex$sex)
+
+
+# Define contrasts
+cont.matrix <- makeContrasts(
+  Women-Men,
+  levels=design)
+
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit3 <- eBayes(fit2, trend = T, robust = T)
+
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/ewmf_sex.csv")
+```
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+
+data_ew_sex$sex <- as.factor(data_ew_sex$sex)
+design <- model.matrix(~0+sex, data=data_ew_sex)
+colnames(design) <- sub("sex", "", colnames(design))
+colnames(design) <- sub(":", "_", colnames(design))
+colnames(design) <- sub(0, "Women" , colnames(design))
+colnames(design) <- sub(1, "Men" , colnames(design))
+
+
+data_ew_sex[,colnames(data_ew_sex) %in% common_uniprot] <- as.data.frame(sapply(data_ew_sex[,colnames(data_ew_sex) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_ew_sex[,colnames(data_ew_sex) %in% common_uniprot]), design = design)
+
+# table(data_ew_sex$sex)
+
+
+# Define contrasts
+cont.matrix <- makeContrasts(
+  Women-Men,
+  levels=design)
+
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit3 <- eBayes(fit2, trend = T, robust = T)
+
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/ew_sex.csv")
+```
+```{r warning=FALSE}
+setwd("C:/Users/cleme/OneDrive - Charité - Universitätsmedizin Berlin/Projects/02_NTD_CHARITE/NTD")
+
+
+data_ln_sex$sex <- as.factor(data_ln_sex$sex)
+design <- model.matrix(~0+sex, data=data_ln_sex)
+colnames(design) <- sub("sex", "", colnames(design))
+colnames(design) <- sub(":", "_", colnames(design))
+colnames(design) <- sub(0, "Women" , colnames(design))
+colnames(design) <- sub(1, "Men" , colnames(design))
+
+
+data_ln_sex[,colnames(data_ln_sex) %in% common_uniprot] <- as.data.frame(sapply(data_ln_sex[,colnames(data_ln_sex) %in% common_uniprot], as.numeric))
+fit <- lmFit(t(data_ln_sex[,colnames(data_ln_sex) %in% common_uniprot]), design = design)
+
+# table(data_ln_sex$sex)
+
+
+# Define contrasts
+cont.matrix <- makeContrasts(
+  Women-Men,
+  levels=design)
+
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit3 <- eBayes(fit2, trend = T, robust = T)
+
+res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+write.csv(res, "results/loaloa/tables/dea_limma/ln_sex.csv")
 ```
 
 ## Trend Analysis of control and Ew positive patients
