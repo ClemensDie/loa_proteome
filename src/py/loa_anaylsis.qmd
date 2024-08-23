@@ -19,6 +19,11 @@ bibliography: references.bib
 bibliographystyle: ieee
 ---
 
+## To Dos:
+- Adapt ML to balancing
+- Fix boxplots for most prominent markers
+- Describe Sex comparison - chek regulated proteins
+
 ## Overview
 
 In this script, we explore the plasma proteome of N = XXX loa loa infected 
@@ -76,6 +81,7 @@ from itables import show # rendering tables
 # custom imports
 from src.utils.utils_general import create_paths, map_uniprot_multiple_genenames, flatten_list
 import src.utils.utils_uniprotAPI as uniprot
+from utils.plotting import plot_volcano_limma, plot_fc_diff
 
 RANDOM_STATE = 42
 ```
@@ -250,23 +256,7 @@ res_path_plots = "results/loaloa/plots"
 res_path_tables = "results/loaloa/tables"
 ```
 
-## Analyses
-
-As mentioned before, we conducted DEA with R's limma
-package and obtained p-values.
-
-We found n=44 proteins significantly altered between 
-LN and loa-infected patients (see Volcano plot). With most prominent up regulation 
-in IGHG4 (P01861) qnd IGHG3 (P01860). When comparing Loa severity levels, 
-differences were found to be less pronounced but still significant (see scatterplot).
-However, IGHG4 (P01861) showed strongest regulation between EW and MF. 
-
-## Define global styling parameters
-
-We define our styling parameters for the whole analysis:
-create own color palette:
-own continous (heatmaps) and one discrete (boxplots)
-
+# Analyses
 
 
 ## Age & Sex Distribution
@@ -389,219 +379,31 @@ show(s)
 
 When invesigating the different severity levels, we observe huge differences
 between the EW (27.7 % men) and MF (71.1 % men).
+
+Furthermore, we are interested into the differences of sex in the different severity groups, 
+since there are more male cases in the MF group and more female ones in EW.
+```{python}
+s = data_sex.groupby(["disease severity", "age_group"])["sex"].value_counts(normalize=False)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", rotation=60)
+ax.set_ylabel("Count", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+
 ## Matching
 
-Based on the observations in the previous section, we balanced the age groups 
-when contrasting INF and LN. When comparing different severity levels, we also 
-balance the for sex. To preserve as many samples as possible in the dataset, 
-we use a matching algorithm that rather samples_left the distribution than searching
-for exact pairs in the data. For matching, we use a matching based on a linear solution for the optimal transport problem. 
-(nice explanation can be found here:
-https://michielstock.github.io/posts/2017/2017-11-5-OptimalTransport/#notes_on_optimal_transport)
-
-We first match age group distributions of LN (n=274) vs INF (n=231).
-
-```{python}
-data_dummy = data.copy()
-
-# data = data.loc[idx]
-```
-
-```{python}
-
-import os
-import pandas as pd
-import numpy as np
-from scipy.spatial.distance import cdist
-import matplotlib.pyplot as plt
-import seaborn as sns
-from ot import emd, emd2
-
-def match(
-    data, group_var, 
-    g1_label, g2_label, 
-    targets,
-    targets2encode=None,
-    distance = "euclidean"):
-
-    # encode targets
-    data = data.copy() 
-    if targets2encode:
-        for t in targets2encode:
-            data.loc[:, t] = data[t].astype("category").cat.codes
-
-    g1 = data.loc[data[group_var]==g1_label]
-    g2 = data.loc[data[group_var]==g2_label]
-
-    print(g1.shape, g2.shape)
-
-    # Compute the cost matrix (Euclidean distance)
-    cost_matrix = cdist(g1[targets], g2[targets], metric='cityblock')
-
-    n1, n2 = len(g1), len(g2)
-    a = np.ones(n1) / n1  # Uniform distribution for group_1
-    b = np.ones(n2) / n2  # Uniform distribution for group_2
-
-    # Solve the optimal transport problem
-    transport_plan = emd(a, b, cost_matrix)
-
-    return transport_plan, cost_matrix, g1, g2
-
-def inspect_matching(
-    g1, g2, transport_plan, cost_matrix, min_samples_left=None, 
-    plot=True, show_plot=False, save_path=None, add_info=""):
-
-    n_left_g1 = []
-    n_left_g2 = []
-    total_costs = []
-    thresholds = sorted(np.unique(transport_plan))
-    for i, th in enumerate(thresholds):
-        significant_samples_left = np.argwhere(transport_plan > th)
-        samples_left_group_1 = np.unique(significant_samples_left[:, 0])
-        samples_left_group_2 = np.unique(significant_samples_left[:, 1])
-        selected_samples_1 = g1.iloc[samples_left_group_1]
-        selected_samples_2 = g2.iloc[samples_left_group_2]
-        # return selected_samples
-        n_left_g1.append(selected_samples_1.shape[0])
-        n_left_g2.append(selected_samples_2.shape[0])
-        total_costs.append(
-            pd.DataFrame(tp_lnInf).iloc[
-                np.unique(significant_samples_left[:,0]), 
-                np.unique(significant_samples_left[:,1])].sum().sum()
-                )
-    res_th = pd.DataFrame(
-        {
-            "th":thresholds,
-            "n_left_1":n_left_g1,
-            "n_left_2":n_left_g2
-            }
-            ).sort_values("n_left_1")
-    # select th based on min samples
-    th_sel = res_th[res_th["n_left_1"] >= min_samples_left].head(1)["th"]
-
-    ## Plotting  
-    if plot:
-        fig, axs = plt.subplots(1,2, sharey=True)
-        axs[0].scatter(
-            x=n_left_g1,
-            y=thresholds, 
-            lw=0.5, ec="k", alpha=.5, c="tab:blue")
-        axs[0].plot(n_left_g1, thresholds)
-        axs[1].scatter(
-            x=total_costs,
-            y=thresholds,
-            lw=0.5, ec="k", alpha=.5, c="tab:blue")
-        axs[1].plot(total_costs, thresholds)
-        if min_samples_left != None:
-            axs[0].axvline(
-                min_samples_left, 
-                c="g", ls="--", lw=3,
-                label=f"Min samples (n={min_samples_left})")
-        fig.supylabel("Index Threshold", fontweight="bold")
-        axs[0].set_xlabel("N samples left in G1", fontweight="bold")
-        axs[1].set_xlabel("Total costs(-)", fontweight="bold")
-        plt.tight_layout()
-        fig.legend()
-        if save_path != None:
-            plt.savefig(os.path.join(save_path, f'matching_plot_{add_info}.png'),dpi=400)
-        if show_plot:
-            plt.show()
-        else:
-            plt.close()
-    return res_th
-
-# return match results and transport plan
-tp_lnInf, cost_matrix_lnInf, g1, g2 = match(
-    data=data_dummy,
-    group_var = "infection",
-    g1_label = "INF", g2_label ="LN",
-    targets= ["age_group"], targets2encode = ["age_group"])
-
-## Inspect matching results 
-res_th = inspect_matching(
-    data_dummy[data_dummy["infection"]=="INF"], 
-    data_dummy[data_dummy["infection"]=="LN"],
-    tp_lnInf, cost_matrix_lnInf, min_samples_left=None, show_plot=True,)
-```
-
-```{python}
-
-indices = np.argwhere(tp_lnInf > 0.0035)
-df_matched = pd.concat(
-    [
-        g1.iloc[indices[:,0]].reset_index()[["index", "age_group", "infection"]],
-        g2.iloc[indices[:,1]].reset_index()[["index", "age_group", "infection"]]
-    ], axis=1
-)
-df_matched.columns = ["idx_g1", "g1", "infection_1", "idx_g2", "g2", "infection_2"]
-df_matched["mass"] = tp_lnInf[indices[:, 0], indices[:, 1]]
-# df_matched = df_matched.sort_values(
-#     by=["idx_g1", "mass"], ascending=False).groupby("idx_g1", as_index=False).first()
-
-idx_g1 = df_matched["idx_g1"]
-idx_g2 = df_matched["idx_g2"]
-
-g1_m = g1.loc[idx_g1]
-g2_m = g2.loc[idx_g2]
-data_matched = pd.concat([
-    g1_m,
-    g2#.loc[idx_g2],
-    ]
-)
-
-print(
-    g1["age_group"].value_counts(normalize=True)-g2["age_group"].value_counts(normalize=True))
-print(
-    g1_m["age_group"].value_counts(normalize=True)-g2["age_group"].value_counts(normalize=True))
-
-o_grouped = data_dummy.groupby(
-    "infection")["age_group"].value_counts(normalize=True).mul(100)
-m_grouped = data_matched.groupby(
-    "infection")["age_group"].value_counts(normalize=True).mul(100)
-fig,axs = plt.subplots(1,2)
-o_grouped.unstack(1).plot.bar( ax=axs[0],
-    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0, legend=False)
-m_grouped.unstack(1).plot.bar( ax=axs[1],
-    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0, legend=False)
-plt.show()
-```
+Based on the observations in the previous section, we balance for age and sex 
+when between INF and LN and within the severity groups. Furthermore 
+we balanced for age within the severity groups. Code and documentation for 
+matching can be found in the correspoding R-script in src/R/loa_analysis.Rmd.
 
 ## Differential Expression Analysis
-
-```{python}
-def plot_volcano_limma(
-    data_volcano, save_path=None, show_plot=True, 
-    add_info="", xlabel = "coef", xlim=None):
-
-    signif_features = data_volcano[(data_volcano["adj.P.Val"]< 0.05) & ((data_volcano["logFC"] < -0.1) | (data_volcano["logFC"] > 0.1))].index
-    print(len(signif_features))
-    fig, ax = plt.subplots(1,1, figsize=(5,5))
-    ax.scatter(
-        x=data_volcano.loc[(data_volcano[f"adj.P.Val"] >= 0.05), f"logFC"], 
-        y=-np.log10(data_volcano.loc[(data_volcano[f"adj.P.Val"] >= 0.05), f"adj.P.Val"]), c="k", alpha=0.5)
-    ax.scatter(
-        x=data_volcano.loc[signif_features, f"logFC"], 
-        y=-np.log10(data_volcano.loc[signif_features, f"adj.P.Val"]), c="#FF3131", alpha=0.99, edgecolor="gray")
-
-    ax.set_xlabel("$\\bf{Log_{2} FC}$", fontdict={"size":14})
-    ax.set_ylabel("$\\bf{-log_{10} (p_{adj.})}$", fontdict={"size":14, "weight":"bold"})        
-
-    ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold", fontsize=9)
-    ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", fontsize=9)
-    ax.axhline(1.3, c="gray", ls="--")
-    ax.axvline(0.1, c="gray", ls="--")
-    ax.axvline(-0.1, c="gray", ls="--")
-    plt.grid()
-    plt.tight_layout()
-
-    if save_path != None:
-        plt.savefig(os.path.join(save_path, f'{add_info}.png'),dpi=400)
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
-   
-```
 
 ```{python}
 # load limma results
@@ -633,32 +435,16 @@ with pd.ExcelWriter(stat_path_severity) as writer:
 
 ```{python}
 save_path_limma = "results/loaloa/plots/limma"
-plot_volcano_limma(limma_inf_ctrl, xlim=[-0.7, 0.7], add_info="volcano_ctrl_inf",save_path=save_path_limma)
-# plot_volcano_limma(limma_mf_ew, xlim=[-0.7, 0.7], add_info="volcano_mf_ew",save_path=save_path_limma)
-# plot_volcano_limma(limma_mf_ew_rl, xlim=[-0.7, 0.7], add_info="volcano_mf_ew",save_path=save_path_limma)
-# plot_volcano_limma(limma_mf_ewmf, xlim=[-0.7, 0.7], add_info="volcano_mf_ewmf",save_path=save_path_limma)
-# plot_volcano_limma(limma_mf_ewmf_rl, xlim=[-0.7, 0.7], add_info="volcano_mf_ewmf_rl",save_path=save_path_limma)
-# plot_volcano_limma(limma_ew_ewmf, xlim=[-0.7, 0.7], add_info="volcano_ew_ewmf",save_path=save_path_limma)
-# plot_volcano_limma(limma_ew_ewmf_rl, xlim=[-0.7, 0.7], add_info="volcano_ew_ewmf_rl",save_path=save_path_limma)
+plot_volcano_limma(limma_inf_ctrl, add_info="volcano_ctrl_inf",save_path=save_path_limma)
+plot_volcano_limma(limma_mf_ew, add_info="volcano_mf_ew",save_path=save_path_limma)
+# plot_volcano_limma(limma_mf_ew_rl, add_info="volcano_mf_ew",save_path=save_path_limma)
+plot_volcano_limma(limma_mf_ewmf, add_info="volcano_mf_ewmf",save_path=save_path_limma)
+# plot_volcano_limma(limma_mf_ewmf_rl, add_info="volcano_mf_ewmf_rl",save_path=save_path_limma)
+plot_volcano_limma(limma_ew_ewmf, add_info="volcano_ew_ewmf",save_path=save_path_limma)
+# plot_volcano_limma(limma_ew_ewmf_rl, add_info="volcano_ew_ewmf_rl",save_path=save_path_limma)
 ```
 
 ```{python}
-
-def plot_fc_diff(x,y, xlabel, ylabel, save_path):
-    diff = np.abs(x.copy().values,y.copy().values)
-    diff = (pd.Series(MinMaxScaler().fit_transform(diff.reshape(-1, 1)).ravel()))
-    s_rho, p = spearmanr(x,y)
-
-    fig, ax = plt.subplots(1,1, figsize=(4,4))
-    for i in range(len(x)):
-        ax.scatter(x[i],y[i], c="k", alpha=diff[i], s=(diff[i]+0.1)*100)
-    ax.axhline(0, c="k", ls="--")
-    ax.axvline(0, c="k", ls="--")
-    ax.set_xlabel("LogFC " + xlabel, fontweight="bold")
-    ax.set_ylabel("LogFC " + ylabel, fontweight="bold")
-    plt.legend(["s$_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.2f}"], loc="lower right")
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_path, f"{xlabel}_{ylabel}.png"), dpi=400)
 plot_fc_diff(
     limma_mf_ew["logFC"],limma_ew_ewmf["logFC"].copy()*-1,
     xlabel="MF vs EW",ylabel="EWMF vs EW", save_path=save_path_limma)
@@ -667,10 +453,22 @@ plot_fc_diff(
     xlabel="MF vs EW",ylabel="MF vs EWMF", save_path=save_path_limma)
 ```
 
+
 ```{python}
+pd.read_csv("data/analysis/loa/matched/data_matched_inf_ln.csv")
+```
+```{python}
+# load matched data
+
+
+
 # boxplots for most prominent marker 
-protein_sel = ["P01861", "P01860", "P01871-2", "P07737", "P05543", "P00738", "P02766", "P01880;P01880-2", "O43866", "P13796", "A0A075B6K6"]
+protein_sel = [
+    "P01861", "P01860", "P01871-2", "P07737", "P05543", "P00738", "P02766", "P01880;P01880-2", "O43866", "P13796", "A0A075B6K6"]
 s = "infection"
+
+data_matched_ln_inf = pd.read_csv("data/analysis/loa/matched/data_matched_inf_ln.csv")
+
 for t in protein_sel:
     df = data[data["infection"].isin(["loa", "LN"])]
     levels = ["LN", "loa"]
@@ -696,15 +494,51 @@ for t in protein_sel:
 ```
 
 
+
+### Sex differences
+
+```{python}
+diff = plot_fc_diff(
+    limma_mf_sex["logFC"],limma_ln_sex["logFC"],
+    xlabel="MF (Women vs Men)",ylabel="LN (Women vs Men)", save_path=save_path_limma)
+diff = plot_fc_diff(
+    limma_ew_sex["logFC"],limma_ln_sex["logFC"],
+    xlabel="EW (Women vs Men)",ylabel="LN (Women vs Men)", save_path=save_path_limma)
+diff = plot_fc_diff(
+    limma_ew_sex["logFC"],limma_mf_sex["logFC"],
+    xlabel="EW (Women vs Men)",ylabel="MF (Women vs Men)", save_path=save_path_limma)
+```
+
+# load limma results
+
+
+```{python}
+limma_ln_sex = pd.read_csv("results/loaloa/tables/dea_limma/ln_sex.csv", index_col=0).loc[limma_inf_ctrl.index]
+limma_mf_sex = pd.read_csv("results/loaloa/tables/dea_limma/mf_sex.csv", index_col=0).loc[limma_inf_ctrl.index]
+limma_ew_sex = pd.read_csv("results/loaloa/tables/dea_limma/ew_sex.csv", index_col=0).loc[limma_inf_ctrl.index]
+limma_ewmf_sex = pd.read_csv("results/loaloa/tables/dea_limma/ewmf_sex.csv", index_col=0).loc[limma_inf_ctrl.index]
+
+
+plot_volcano_limma(limma_ln_sex, add_info="volcano_ln_sex",save_path=save_path_limma)
+plot_volcano_limma(limma_mf_sex, add_info="volcano_mf_sex",save_path=save_path_limma)
+plot_volcano_limma(limma_ew_sex , add_info="volcano_ew_sex",save_path=save_path_limma)
+plot_volcano_limma(limma_ewmf_sex , add_info="volcano_ewmf_sex",save_path=save_path_limma)
+
+```
+
+
 ## Correlation of Plasma proteins with FBC (& ratios) and Loa microfilarial count
 
 
 ```{python}
 data_zero_ll = data[data["ll_mf_log2"]>1]
-meta_table_proteins = pd.read_csv(r"results/loaloa/tables/technical_meta_table.csv", index_col=0)
+meta_table_proteins = pd.read_csv(
+    r"results/loaloa/tables/technical_meta_table.csv", index_col=0)
 
 corr_ll_mf = pd.DataFrame(
-    [spearmanr(data_zero_ll[p], data_zero_ll["ll_mf"], nan_policy="omit") for p in common_proteins],
+    [spearmanr(
+        data_zero_ll[p], data_zero_ll["ll_mf"], 
+        nan_policy="omit") for p in common_proteins],
     index=common_proteins).sort_values(by="statistic")
 corr_ll_mf["Genes"] = meta_table.loc[common_proteins, "Gene Names"]
 corr_ll_mf
