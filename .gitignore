@@ -16,3 +16,5 @@ results/*
 *.css
 *.woff
 *.Rproj.user
+
+**/__pycache__/**
