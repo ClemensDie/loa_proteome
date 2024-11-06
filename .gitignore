@@ -1,6 +1,8 @@
 # anything within data
 data/
 tmpData/
+# supplement
+supplement/
 # any of the images created
 images/*
 results/*
@@ -16,5 +18,14 @@ results/*
 *.css
 *.woff
 *.Rproj.user
+*.log
+# Latex files
+*.aux
+*.toc
+*.tex
+*.bib
+
+# further analysis files
+*.ipynb
 
 **/__pycache__/**
