@@ -1,0 +1,2068 @@
+---
+title: "Analysis of the human host response to Loa Loa infection"
+authors: "Clemens Dierks, Pinkus Tober-Lau"
+orcid: 0000-0002-4560-8939
+email: clemens.dierks@charite.de 
+date: last-modified 
+format: 
+    html:
+        code-fold: true
+        code-overflow: wrap
+        code-tools: true
+        graphics: yes
+        toc: true
+        toc-location: left-body
+        toc-title: "Outline"
+        html-math-method: katex
+
+bibliography: references.bib
+bibliographystyle: ieee
+---
+## Overview
+
+In this script, we explore the plasma proteome of N = 475 *loa loa* infected 
+patients (INF) and loa-negative (LN) controls. First, we present sex and age 
+demographics of the study population and discuss the influence of eosinophils 
+on the LN participants. Then, we import analysis results from differential 
+expression analysis (DEA) conducted in the limma R package 
+(see r/loa_analysis.Rmd). We contrasted LN vs INF as well as for different 
+severity levels within the loa-infected patients: Patients with reported eye 
+worm infection (EW), patients with measured loa microfilaria in the blood (MF) 
+and with both (EWMF). Furthermore, we explore the associations between measured 
+proteins and reported symptoms in LN and EW patients. 
+Finally, we train machine learning models to distinguish 
+LN from INF, MF and EW. An overview of the study design is given here 
+@Veletzky2022. An extensive introduction into Loa loa infections (or loiasis) 
+can be found here @Ramharter2024.
+
+## Libraries
+
+```{python}
+# general imports
+import os
+import sys
+os.chdir(r"c:\\Users\\cleme\\OneDrive - Charité - Universitätsmedizin Berlin\\Projects\\02_NTD_CHARITE\\NTD")
+sys.path.append('src')
+sys.path.append('org')
+sys.path.append('src/py')
+import warnings
+warnings.filterwarnings('ignore')
+
+# data manipulation
+import pandas as pd
+import numpy as np
+from itertools import combinations, product
+
+# plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+from adjustText import adjust_text
+
+# ml & statistics
+import joblib 
+from statsmodels.stats.multitest import multipletests
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, LeaveOneOut ,StratifiedKFold
+from sklearn.feature_selection import mutual_info_classif, RFECV
+from sklearn.metrics import accuracy_score, roc_curve, roc_auc_score, confusion_matrix
+from sklearn.preprocessing import MinMaxScaler
+from scipy.stats import spearmanr
+from scipy.integrate import trapezoid
+from itables import show
+RANDOM_STATE = 42
+```
+
+## Functions
+
+```{python}
+def plot_volcano_limma(
+    data_volcano, save_path=None, show_plot=True, 
+    add_info="", xlabel = "coef", fc=0.1):
+
+    # Plot Volcano plots based on limma outputs
+
+    # Select features based on significance and FC
+    regulated_features = data_volcano[
+        (data_volcano["adj.P.Val"]< 0.05) & 
+        ((data_volcano["logFC"] < -fc) | 
+        (data_volcano["logFC"] > fc))
+        ].index
+    
+    # Plotting
+    fig, ax = plt.subplots(1,1, figsize=(5,5))
+    ax.scatter(
+        x=data_volcano.loc[
+            (data_volcano[f"adj.P.Val"] >= 0.05), f"logFC"], 
+        y=-np.log10(
+            data_volcano.loc[
+                (data_volcano[f"adj.P.Val"] >= 0.05), 
+                f"adj.P.Val"]), c="k", alpha=0.5)
+    ax.scatter(
+        x=data_volcano.loc[regulated_features, f"logFC"], 
+        y=-np.log10(
+            data_volcano.loc[regulated_features, f"adj.P.Val"]), 
+            c="#FF3131", alpha=0.99, edgecolor="gray")
+
+    ax.set_xlabel(
+        "$\\bf{Log_{2} FC}$", fontdict={"size":14})
+    ax.set_ylabel(
+        "$\\bf{-log_{10} (p_{adj.})}$", 
+        fontdict={"size":14, "weight":"bold"})        
+
+    ax.axhline(1.3, c="gray", ls="--")
+    ax.axvline(fc, c="gray", ls="--")
+    ax.axvline(-fc, c="gray", ls="--")
+    ax.set_xlim([-0.5, 1.3])
+    ax.set_ylim([-0.5, 16])
+    ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold", fontsize=9)
+    ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", fontsize=9)
+    plt.grid()
+    plt.tight_layout()
+
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'{add_info}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    
+def select_topF_imp(model, th_expl_imp):
+    # Select features based on cumulative feature importanc
+    feat_imps = pd.Series(model.feature_importances_)
+    feat_imps = feat_imps[feat_imps > 0]
+    cum_sum = feat_imps.sort_values()[::-1].cumsum()
+    cum_sum = cum_sum[cum_sum < th_expl_imp]
+    feature_names = pd.Series(model.feature_names_in_)
+    return feature_names.loc[cum_sum.index]
+
+def select_topF_mutualinfo(X_train, y_train, th_exp_imp):
+    mic = pd.DataFrame(
+        {"MIC_abs":mutual_info_classif(
+            X_train, y_train, random_state=RANDOM_STATE)}, 
+        index=X_train.columns).sort_values(by="MIC_abs")[::-1]
+    mic["MIC_perc"] = mic["MIC_abs"]/mic["MIC_abs"].sum()
+    mic["MIC_cumsum"] = mic["MIC_perc"].cumsum()
+    mic = mic[mic["MIC_cumsum"] < th_exp_imp]
+    return mic.index
+def plot_fc_diff(limma_x,limma_y, xlabel, ylabel, save_path):
+    limma_x = limma_x.fillna("")
+    limma_y = limma_y.fillna("")
+
+    # check for common features
+    common_idx = list(set(limma_x.index) & set(limma_y.index))
+    limma_x = limma_x.loc[common_idx]
+    limma_y = limma_y.loc[common_idx]
+    fc_x = limma_x["logFC"]
+    fc_y = limma_y["logFC"]
+    p_x = -np.log10(limma_x["adj.P.Val"])
+    p_y = -np.log10(limma_y["adj.P.Val"])
+
+    diff = np.abs(p_x.copy().dropna().values,p_y.copy().values)
+    diff = (pd.Series(MinMaxScaler().fit_transform(diff.reshape(-1, 1)).ravel()))
+    s_rho, p = spearmanr(fc_x,fc_y)
+
+    # collect annotation 
+    texts = []
+
+    signif_both = 0
+    signif_MFEW = 0
+    signif_EW = 0
+
+    # return diff
+    fig, ax = plt.subplots(1,1, figsize=(8,8))
+    for i in range(len(fc_x)):
+        p_x = limma_x.loc[common_idx[i], "adj.P.Val"]
+        p_y = limma_y.loc[common_idx[i], "adj.P.Val"]
+        if limma_x.loc[common_idx[i], "genes"] != "nan":
+            label = limma_x.loc[common_idx[i], "genes"].split(" ")[0]
+            if label.startswith("IGL") | label.startswith("IGK") | label.startswith("IGHV") | label.startswith("IGHG4"):
+                label=""
+        else:
+            ""
+        if (p_x < 0.05) & (p_y >= 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:green", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label))
+            signif_EW +=1
+        elif (p_x >= 0.05) & (p_y < 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:blue", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k", )
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label))
+            signif_MFEW +=1
+        elif (p_x < 0.05) & (p_y < 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:red", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label, fontdict={"weight":"bold"}))
+            signif_both +=1
+        else:    
+            ax.scatter(
+                fc_x[i],fc_y[i], c="gray", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+    adjust_text(texts,
+            # expand=(1.2, 2),
+            arrowprops=dict(arrowstyle='-', color='k'),
+            # only_move={'text':'y','text':'x'}
+            )
+
+    ax.scatter(
+        [], [], c="tab:blue", label="Signif. in MF + EWMF vs LN", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.scatter(
+        [], [], c="tab:green", label="Signif. in EW vs LN", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.scatter(
+        [], [], c="tab:red",  label="$\\bf{Signif. \ in \ both}$", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.axhline(0, c="gray", ls="--")
+    ax.axvline(0, c="gray", ls="--")
+    ax.plot([-1.5,1.5], [-1.5,1.5], ls="--", c="k")
+    ax.set_xlim([-.4, 0.8])
+    ax.set_ylim([-.4, 0.8])
+    ax.set_xticklabels(ax.get_xticklabels(), fontdict={"weight":"bold"})
+    ax.set_yticklabels(ax.get_yticklabels(), fontdict={"weight":"bold"})
+    # Plot IGHG4 seperately to not skew the visualization
+    ax.text(0.51, 0.82, "IGHG4 [x: 1.05, y: 0.28]", c="tab:blue")
+    fig.supxlabel("LogFC " + xlabel, fontweight="bold")
+    fig.supylabel("LogFC " + ylabel, fontweight="bold")
+    ax.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f"{xlabel}_{ylabel}.png"), dpi=400)
+
+    print(signif_both, signif_MFEW, signif_EW)
+
+def plot_roc(
+    fpr_test_lst, tpr_test_lst, 
+    colors, contrasts, 
+    add_info, save_path, show_plot=False):
+    fig, ax = plt.subplots(1,1, figsize=(5,5))
+    for fpr_test, tpr_test, c, cs in zip(
+        fpr_test_lst, tpr_test_lst, colors, contrasts):
+        auroc_test = 1-trapezoid(fpr_test, tpr_test)
+        ax.plot(
+            fpr_test, tpr_test, c=c, alpha=1, lw=5, 
+            label=f"AUROC Val.: {auroc_test:.2f} ({cs})")
+    ax.plot([0,1], c="gray", ls="--")
+    ax.grid()
+    # Labels
+    ax.set_xlabel('FPR (1 - Specificity)', weight="bold", fontsize=14)
+    ax.set_ylabel('TPR (Sensitivity)', weight="bold", fontsize=14)
+    ax.set_xticklabels(ax.get_xticklabels(), weight="bold")
+    ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
+    plt.legend(ncols=1)
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f"ROC{add_info}"), dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
+
+            sympt_label = {
+                'unspecific': 'Unspecific',
+                'neurological': 'Neurological',
+                'urticaria': 'Urticaria',
+                'swelling_daily_life': 'Swelling',
+                'myalgia_daily_life': 'Myalgia',
+                'arthralgia_daily_life': 'Arthralgia',
+                'pruritus_daily_life': 'Pruritus'}
+
+            mapped_t = meta_table.loc[t, "Gene Names"].split(" ")[0]
+            if mapped_t == "":
+                mapped_t = t
+            levels = [
+                "LN asympt.", "LN sympt.",
+                "EW asympt." ,"EW sympt.",
+                "MF asympt.", "MF sympt."]
+            x_labels = [
+                "LN asympt.", "LN sympt.", 
+                "EW asympt." ,"EW sympt.",
+                "MF asympt.", "MF sympt."]
+            colors = [sns.color_palette("Blues_r")[0],
+                    sns.color_palette("Blues_r")[2],
+                    sns.color_palette("Reds")[2],
+                    sns.color_palette("Reds_r")[0],
+                    sns.color_palette("Oranges")[1],
+                    sns.color_palette("Oranges_r")[1],
+                    ]
+                
+            df_plot = data[data[f"{c}_severity"].isin(levels)]
+            fig , ax = plt.subplots(1,1, figsize=(5,4))
+            sns.boxplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels,
+                fliersize=0, palette=colors, fill=False)
+            sns.stripplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels, 
+                palette=colors, edgecolor="k", linewidth=1, alpha=.4)
+            ax.axvline(3.5, c="gray", lw=1, ls="--")
+            ax.set_xticklabels(x_labels, fontdict={"weight":"bold"}, rotation=45)
+            ax.set_xlabel(sympt_label[c],  fontdict={"weight":"bold"})
+            ax.set_ylabel(
+                "$\\mathbf{log_2}$ " + f"{mapped_t} abundance", 
+                fontdict={"weight":"bold"})
+            if add_info=="_jt_05":
+                p = res_cont_dict[c].loc[
+                    res_cont_dict[c].index==t, "JT_adj_pvalue"].values[0]
+                ax.set_title(
+                    f"{mapped_t}\n" + "$p_{jt}$: "+f"${p:.2f}$",
+                            fontdict={"weight":"bold"})
+            else:
+                p = res_cont_dict[c].loc[
+                    res_cont_dict[c].index==t, "KW_adj_pvalue"].values[0]
+                ax.set_title(
+                    f"{mapped_t}\n" + "$p_{kw}$: "+f"${p:.2f}$",
+                            fontdict={"weight":"bold"})
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(save_path, f"{c}_{mapped_t}{add_info}.png"),
+                  dpi=300)
+            plt.close()
+def plot_loaMF_prot(df, x, y, target, order, colors, save_path=None, show_plot=False):
+    # map uniprot -> gene symbol
+    mapped_y = meta_table[meta_table.index == y]["Gene Names"].values[0]
+        # remove NA's
+    common_ids = list(set(df[x].dropna().index) & set(df[y].dropna().index))
+    
+    df = df.copy()
+    df = df.loc[common_ids]
+
+    # fit linear model for 
+    m,b = np.polyfit(df.loc[:, x],df.loc[:, y],deg=1)
+    fig, ax = plt.subplots(1,1, figsize=(3.5,3.5))
+    ax.plot(df.loc[:, x], m*df.loc[:, x].values+b, lw=2, c="k", ls="--")
+    sns.scatterplot(
+        ax=ax, data=df, x=x, y=y, hue=target, alpha=0.8, 
+        edgecolor="k", linewidth=1., legend=False, palette=colors,
+        hue_order=order)
+    ax.grid(alpha=0.5) 
+    ax.set_ylabel("$\\bf{Log_2}$ Protein Abundance", fontdict={"weight":"bold"})
+    ax.set_xlabel("$\\bf{Log_2}$" +  f" Loa mf / mL Blood", fontdict={"weight":"bold"})
+    s_rho, p = spearmanr(df.loc[common_ids, x],df.loc[common_ids, y])
+    ax.text(x=1, y=np.max(df[y])-.06, s=f"$y = {m:.2f}*x+{b:.2f}$" + "\ns$_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.2f}")
+    ax.set_title(mapped_y.split(" ")[0] + "\n", fontweight="bold")
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'{mapped_y}_{x}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+def optimize_clf_with_loocv(
+    X, y, clf, param_grid, random_state , scoring='roc_auc'):
+    """
+    Generic function to optimize any scikit-learn clf's hyperparameters using 
+    Leave-One-Out Cross Validation (LOOCV).
+    
+    Parameters:
+    - X: Feature matrix (numpy array or pandas DataFrame)
+    - y: Target vector (numpy array or pandas Series)
+    - clf: An instance of a scikit-learn classifier 
+    (e.g., RandomForestClassifier, LogisticRegression, SVM etc.)
+    - param_grid: A dictionary where keys are parameter names and values 
+    are lists/ranges of values to try
+    - random_state: Seed used for pseudo randomnes
+    - scoring: The metric used for optimization ('roc_auc' by default). 
+    an be any scikit-learn compatible metric.
+   
+
+    Returns:
+    - best_params: Dictionary of the best parameters found
+    - best_score: The best score (based on the specified scoring metric)
+    - scores: obtained scores
+    """
+    
+    # Initialize Leave-One-Out Cross-Validation
+    loo = LeaveOneOut()
+    best_score = -1  # Initialize best score
+    best_params = None
+    
+    # Create a list of all combinations of hyperparameters
+    param_names = list(param_grid.keys())
+    # Cartesian product of all parameter values
+    param_values = list(product(*param_grid.values()))
+    param_index = list(
+        product(*(range(len(values)) for values in param_grid.values())))
+
+    scores = []
+    # Iterate over all parameter combinations
+    for i, (idx, param_set) in enumerate(zip(param_index, param_values)):
+        param_dict = dict(zip(param_names, param_set))
+        clf.set_params(**param_dict)  # Set clf parameters
+        
+        # adapt random state
+        if "random_state" in clf.get_params():
+            clf.set_params(**{"random_state":random_state})
+
+        y_pred_prob = []
+        y_preds = []
+        y_true = []
+
+        # LOOCV: Iterate over each train-test split
+        for train_idx, test_idx in loo.split(X):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            y_true.append(y_test)
+            # Train the clf on the current training set
+            clf.fit(X_train, y_train)
+
+            # Get predicted probabilities for clfs that support it
+            try:
+                y_pred_prob.append(clf.predict_proba(X_test)[:, -1])
+            except AttributeError:
+                # Fallback if clf doesn't support `predict_proba`
+                y_pred_prob.append(clf.decision_function(X_test))
+        
+            y_preds.append(clf.predict(X_test))
+
+
+        # Calculate AUROC for this fold   
+        if scoring == 'roc_auc':
+            score = roc_auc_score(y_true, y_pred_prob)
+        # Use other scoring metrics (like accuracy, f1, etc.)
+        else:
+            if scoring == 'accuracy':
+                score = accuracy_score(y_true, y_preds)
+            else:
+                raise ValueError(
+                    f"Scoring method {scoring} is not supported yet.")
+        
+        # Update best parameters if current mean score is better
+        if score > best_score:
+            best_score = score
+            best_params = param_dict
+
+        # print(i, score, best_score, param_values[i])
+        scores.append(score)
+    print("Run Finished")
+    return best_params, best_score, scores, param_values
+
+```
+
+## Data Import
+
+We import two different datasets, an imputed one 
+were proteins with a missing value ratio of 
+>40% were removed and the remaining ones imported 
+with knn consisting of n=242 proteins and a non-imputed dataset containing 
+n=274 proteins.
+
+Furthermore, we exclude pregnant women (n=8) from the analysis and participants
+< 18 years, and selected only patients with loa monoinfection and healthy 
+controls.
+
+```{python}
+data = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+data = data[(data["age"]>= 18) | data["age"].isna()]
+data = data[data["infection"].isin(["loa", "healthy controls"])]
+data = data.loc[data["pregnancy"]!="pregnant"]
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+data = data.drop(data[(data["eos_high"] == "1") & (data["disease severity"] == "LN")].index)
+```
+
+```{python}
+data = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+
+data_imp = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_IMP_LOA_MV04.csv"),
+	index_col=0
+)
+
+# read technical meta table
+meta_table = pd.read_csv(
+    "results/loaloa/tables/technical_meta_table.csv", index_col=0)
+
+data_imp["infection"] = data["infection"]
+
+# remove patients under 18 years old
+data = data[(data["age"]>= 18) | data["age"].isna()]
+data_imp = data_imp[(data_imp["age"]>= 18) | data_imp["age"].isna()]
+# define age groups
+data["age_imp"] = data["age"].fillna(200)
+data_imp["age_imp"] = data_imp["age"].fillna(200)
+data["age_group"] = pd.cut(
+    data["age_imp"], bins=[18, 34, 60, 200], labels=["<34", ">34 & <60", ">60"])
+data_imp["age_group"] = pd.cut(
+    data_imp["age_imp"], bins=[18, 34, 60, 200], labels=["<34", ">34 & <60", ">60"])
+
+
+# Select all co infections 
+# Exclude all co infections from the rest of the analysis
+data = data[data["infection"].isin(["loa", "healthy controls"])]
+
+# add threshold for absolute eosionophil counts
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+# Load information about pregnancy and exclude pregnant women
+data_imp = data_imp.loc[data_imp["pregnancy"]!="pregnant"]
+data= data.loc[data["pregnancy"]!="pregnant"]
+```
+
+
+```{python}
+# Rename Severity Level
+severity_level_dict = {
+    "eye worm+":"EW", 
+    "eye worm + microfilaria":"EWMF",      
+    "microfilaria+":"MF",
+    "hyper microfilaria":"MF",
+    "healthy":"LN"
+    }
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+data_imp["disease severity"] = data_imp["disease severity"].replace(
+    severity_level_dict
+)
+
+# Rename controls to loa-negative
+data["infection"] = data["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+data_imp["infection"] = data_imp["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+```
+
+
+```{python}
+# Select blood counts and clinical symptoms from meta data
+clinical_symptoms = list(data.columns[53:83])
+# relative blood counts are reported in %, abs. eos, lym, bas, neu in [x10^3 / µL], hb [mg/dl]
+blood_counts = list(data.columns[42:54]) + ["NLR", "BLR", "ELR", "MLR"]
+blood_counts.remove("pru_history")
+
+data[clinical_symptoms] = data[clinical_symptoms].replace({9, np.nan})
+
+# Calculate common full blood counts ratios, such as NLR, BLR, ELR, MLR 
+data["NLR"] = data["neu_abs"]/data["lym_abs"]
+data["BLR"] = data["bas_abs"]/data["lym_abs"]
+data["ELR"] = data["eos_abs"]/data["lym_abs"]
+data["MLR"] = data["mon_abs"]/data["lym_abs"]
+
+# Calculate log2 loa mf count 
+data["ll_mf"].replace({0:np.nan}, inplace=True)
+data["ll_mf_log2"] = np.log2(data["ll_mf"]+1)
+```
+
+
+For the symptom analysis, we define more meaniningfull categoried instead of 
+individual symptoms.
+```{python}
+# Group symptoms
+cs_dict = {
+    "unspecific" : ["headache", "fatigue"],
+    "neurological": ["paralysis", "paresthesia"],
+    "urticaria": ["urticaria"]
+}
+for k in cs_dict.keys():
+    data_temp = data.copy()
+    data_temp = data_temp[cs_dict[k]].dropna(how="all").fillna(0)
+
+    data.loc[data_temp.index, k] = np.where(data_temp.sum(axis=1)>0, 1, 0)
+
+cs_dict_history = {
+    "swelling_daily_life" : (
+        ["swelling", "cs_history"], 
+        ["sw_sleep", "sw_work", "cs_consultation", "cs_lastyear"]),
+    "myalgia_daily_life": (
+        ["mya_history"],
+        ['mya_consultation', 'mya_sleep', 'mya_work', 
+        'mya_psychologicaldistress']),
+    "arthralgia_daily_life": (
+        ['art_history'],
+        ['art_consultation', 'art_sleep', 'art_work', 
+        'art_psychologicaldistress',]),
+    "pruritus_daily_life" : (
+        ["pru_history"],
+        ['pru_consultation', 'pru_distribution','pru_sleep','pru_work', 
+        'pru_psychologicaldistress',]
+    )
+}
+for k in cs_dict_history.keys():
+    data_temp = data.copy()
+    idx_0 = []
+    idx_1 = []
+    for asymp in cs_dict_history[k][0]:
+        idx_0 += list(data_temp.loc[data_temp[asymp]==0, asymp].index)
+    idx_0 = list(set(np.ravel(idx_0)))
+
+    for symp in cs_dict_history[k][1]:
+        idx_1 += list(data_temp.loc[data_temp[symp]==1, symp].index)
+    
+    data.loc[idx_0, k] = 0
+    data.loc[idx_1, k] = 1
+
+# Define combine labels for disease group and reported symptoms
+for cs in list(cs_dict.keys()) + list(cs_dict_history.keys()):
+    data[f"{cs}_severity"] = data["disease severity"]+"_"+data[cs].astype(str)
+    data[f"{cs}_severity"].replace(
+    {
+        "EW_0.0": "EW asympt.",
+        "EW_1.0": "EW sympt.",
+        "EWMF_0.0": "EWMF sympt.",
+        "EWMF_1.0": "EWMF sympt.",
+        "MF_1.0": "MF sympt.",
+        "MF_0.0": "MF asympt.",
+        "LN_0.0": "LN asympt.",
+        "LN_1.0": "LN sympt."
+    }, inplace=True)
+```
+
+
+```{python}
+# select uniprot ids for proteomic features
+common_proteins = meta_table.index
+common_proteins_imp = list(set(data_imp.columns) & set(meta_table.index))
+
+# Update imputed columns
+meta_cols = list(set(data.columns).difference(common_proteins_imp))
+data_imp = data_imp.loc[data.index]
+
+data_imp = pd.concat([data[meta_cols], data_imp[common_proteins_imp]], axis=1)
+```
+
+
+LN controls also show high levels of eosinophils,
+we apply a threshold of absolute eosinophil counts of 500 per µL blood to 
+exclude patients with potential undetected parasitic coinfections.
+```{python}
+fig, ax = plt.subplots(1,1)
+sns.boxplot(data=data,
+            y="eos_abs", 
+            x="disease severity",
+            order=["LN", "EW", "EWMF", "MF"],
+            ax=ax, fill=False, hue="disease severity", fliersize=0, legend=False
+            )
+sns.stripplot(data=data,
+            y="eos_abs", 
+            x="disease severity",
+            order=["LN", "EW", "EWMF", "MF"],
+            ax=ax,hue="disease severity", alpha=0.5, linewidth=1, edgecolor="k"
+            )
+plt.ylim([0,10])
+plt.ylabel("abs. eosinophil count")
+plt.grid()
+plt.legend(loc="upper left")
+plt.savefig("results/loaloa/manuscript/supplement/loa_eos_count.png", dpi=200)
+```
+
+
+```{python}
+# remove all controls with and absolute eosinophil count > 0.5 (n=99)
+data = data.drop(
+    data[(data["eos_high"] == "1") & (data["disease severity"] == "LN")].index)
+
+# Export data 
+data.to_csv("data/analysis/loa/loa_data_05.csv", index=False)
+data_imp = data_imp.loc[data.index]
+data_imp.to_csv("data/analysis/loa/loa_data_imp_05.csv", index=False)
+
+data_imp["disease severity"] = data_imp["disease severity"].replace(
+    {"HYMF":"MF"})
+```
+
+
+```{python}
+# Create paths to store results
+res_path_plots = "results/loaloa/plots"
+res_path_tables = "results/loaloa/tables"
+res_path_manuscript = "results/loaloa/manuscript"
+```
+
+# Analyses
+## Age & Sex Distribution
+We investigated age and sex distributions between LN and INF
+in our dataset, since we know that a big fraction of the high abundant 
+plasma proteome shows significant differences between sexes and age groups 
+(@Dierks2024, @Dordevic2023).
+Therefore, we explore age and sex differences between LN and INF, as well as 
+between the different severity level.
+
+```{python}
+data_sex = data.copy()
+data_sex["sex"] = data["sex"].replace({0:"Women", 1:"Men"})
+fig, ax = plt.subplots(1,1)
+sns.violinplot(ax=ax,
+    data=data_sex, x="infection", y="age", hue="sex", split="sex",
+    palette=["tab:blue", "tab:red"])
+ax.grid()
+ax.set_ylabel("age in years", fontweight="bold")
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+show(data_sex.groupby(["infection", "sex"])["age"].median())
+```
+
+Women in the LN group are 6 years younger than those in the INF 
+group. Men in the LN group are about 4 years younger than in the INF group.
+
+```{python}
+data_sex = data.copy()
+data_sex["sex"] = data["sex"].replace({0:"Women", 1:"Men"})
+fig, ax = plt.subplots(1,1)
+sns.violinplot(ax=ax,
+    data=data_sex, x="disease severity", y="age", hue="sex", split="sex",
+    palette=["tab:blue", "tab:red"], order=["LN", "MF", "EWMF", "EW"])
+ax.grid()
+ax.set_ylabel("age in years", fontweight="bold")
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+show(data_sex.groupby(["disease severity", "sex"])["age"].median())
+```
+
+When exploring age and sex distribution between the different severity levels, 
+we find most prnounced differences within the the MF group (5.1 years). However, 
+in the female EW subgroup, we find a bimodal age distribution. 
+
+Due to missing or unclear age information for 41 participants in the LN group, 
+we categorized age into three groups: under 34 years, between 34 and 60 years, 
+and over 60 years. These age brackets were selected partly because we know that participants with missing age information are over 60 years old, and also based 
+on findings from @Lehallier2019, which indicate that significant changes in the 
+plasma proteome occur around the ages of 34 and 60.
+
+
+```{python}
+s = data.groupby(["infection"])["age_group"].value_counts(normalize=True).mul(100)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+ax.set_ylabel("porportion in %", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+
+The INF group is composed of less people under 40 (14%) compared to 
+the LN group. The medium age group is well balanced.
+
+```{python}
+s = data.groupby(["disease severity"])["age_group"].value_counts(normalize=True).mul(100)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+ax.set_ylabel("porportion in %", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+
+When investigating the different severity groups the difference becomes even
+more pronounced. While only having only 8.3 % of younger participants in the EWMF 
+group, over 31 % in the LN group are younger than 40 years old. 
+
+Now we check the sex distribution in the different severity groups:
+```{python}
+s = data_sex.groupby(["infection"])["sex"].value_counts(normalize=True).mul(100)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["tab:red", "tab:blue"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+ax.set_ylabel("porportion in %", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+
+Sex distributions between the INF and LN group are almost the same, with more 
+women in both groups (~ 60%).
+
+```{python}
+s = data_sex.groupby(["disease severity"])["sex"].value_counts(normalize=True).mul(100)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["tab:blue", "tab:red"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+ax.set_ylabel("porportion in %", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+
+When investigating the different severity levels, we observed huge differences
+between the EW (27.7 % men) and MF (71.1 % men).
+
+Furthermore, we are interested into the differences of sex in the different severity groups, 
+since there are more male cases in the MF group and more female ones in EW.
+```{python}
+s = data_sex.groupby(["disease severity", "age_group"])["sex"].value_counts(normalize=False)
+fig, ax = plt.subplots(1,1)
+s.unstack(1).plot.bar( ax=ax,
+    stacked=True, color=["#acd8a7", "#46923c", "#276221"], rot=0)
+ax.set_xlabel("", fontweight="bold")
+ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", rotation=60)
+ax.set_ylabel("Count", fontweight="bold")
+plt.grid()
+plt.tight_layout()
+plt.show()
+show(s)
+```
+## Matching
+
+Based on the observations in the previous section, we balance disease groups 
+for age (groups). Code and documentation for 
+matching can be found in the correspoding R-script in *src/R/loa_analysis.Rmd*.
+## Differential Expression Analysis
+
+Differential expression analysis was performed in R with the limma package.
+
+```{python}
+# load limma results and sort them as the first one
+limma_inf_ctrl = pd.read_csv(
+    "results/loaloa/tables/dea_limma/ln_infected_05.csv", 
+    index_col=0)
+limma_mfewmf_ctrl = pd.read_csv(
+    "results/loaloa/tables/dea_limma/ln_mfewmf_05.csv", 
+    index_col=0)
+limma_mfewmf_ctrl["logFC"] = limma_mfewmf_ctrl["logFC"] *-1
+limma_ew_ctrl = pd.read_csv(
+    "results/loaloa/tables/dea_limma/ln_ew_05.csv", 
+    index_col=0)
+limma_mf_ew = pd.read_csv(
+    "results/loaloa/tables/dea_limma/mf_ew_05.csv", 
+    index_col=0).loc[limma_inf_ctrl.index]
+limma_mf_ewmf = pd.read_csv(
+    "results/loaloa/tables/dea_limma/mf_ewmf_05.csv", 
+    index_col=0).loc[limma_inf_ctrl.index]
+limma_ew_ewmf = pd.read_csv(
+    "results/loaloa/tables/dea_limma/ew_ewmf_05.csv", 
+    index_col=0).loc[limma_inf_ctrl.index]
+limma_ew_ctrl = pd.read_csv(
+    "results/loaloa/tables/dea_limma/ln_ew_05.csv", 
+    index_col=0).loc[limma_inf_ctrl.index]
+```
+
+Detailed information about the differential expression analysis can be found
+in the mansucript. In short, we found only 5 proteins differentially regulated
+when contrasting LN and INF, including IGHG4, LCP1, ACTBL2, IGHG3 and IGLV9-49.
+
+When comparing LN to MF + EWMF, we found 76 proteins to be differentially 
+regulated. Within the contrast of LN vs EW, we found 26 proteins. Only IGHG4 and
+ACTB were differentially expressed between EW and MF.
+
+```{python}
+save_path_limma = "results/loaloa/plots/limma"
+plot_volcano_limma(
+    limma_inf_ctrl, add_info="volcano_ctrl_inf_05",
+    save_path=save_path_limma)
+plot_volcano_limma(
+    limma_mf_ew, add_info="volcano_mf_ew_05",
+    save_path=save_path_limma)
+plot_volcano_limma(
+    limma_mf_ewmf, add_info="volcano_mf_ewmf_05",
+    save_path=save_path_limma)
+limma_ew_ewmf["logFC"] = limma_ew_ewmf["logFC"]*-1# contrast was defined inversly
+plot_volcano_limma(
+    limma_ew_ewmf, add_info="volcano_ew_ewmf_05",
+    save_path=save_path_limma)
+plot_volcano_limma(
+    limma_mfewmf_ctrl, add_info="volcano_mfewmf_ctrl_05",
+    save_path=save_path_limma)
+plot_volcano_limma(
+    limma_ew_ctrl, add_info="volcano_ew_ctrl_05",
+    save_path=save_path_limma)
+```
+
+
+```{python}
+# boxplots for most prominent marker for manuscript, a.o Fig 1C
+protein_sel = [
+    "P01861", "P01860", "P01871-2", "P07737", "P05543", "P00738", "P02766", 
+    "P01880;P01880-2", "O43866", "P13796", "A0A075B6K6",
+    "P20742", "P04278"]
+s = "infection"
+
+data_matched_ln_inf = pd.read_csv(
+    "data/analysis/loa/matched/data_matched_inf_ln.csv")
+
+for t in protein_sel:
+    df = data_matched_ln_inf[data_matched_ln_inf["infection"].isin(["INF", "LN"])]
+    levels = ["LN", "INF"]
+    colors = ["tab:blue", "tab:red"]
+    x_labels = ["LN", "INF"]
+    fig, ax = plt.subplots(1,1, sharex=True, figsize=(2,3))
+    sns.boxplot(ax=ax, order=levels,
+        data=df, x=s, y=t, fliersize=0, fill=False, legend=False, palette=colors)
+    sns.stripplot(ax=ax, order=levels,
+        data=df, x=s, y=t,
+        legend=False, edgecolor="k", alpha=0.6, linewidth=1, palette=colors)
+    ax.set_xticklabels(x_labels, fontdict={"weight":"bold"})
+    ax.set_yticklabels(ax.get_yticklabels(), fontdict={"weight":"bold"})
+    ax.set_xlabel("")
+    mapped_t = meta_table.loc[t, "Gene Names"].split(" ")[0]
+    ax.set_ylabel(f"$log_2$ {mapped_t} abund.", fontdict={"weight":"bold"})
+    ax.set_ylabel("")
+    ax.set_title(f"{mapped_t}", fontdict={"weight":"bold"})
+    ax.grid()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path_limma, f"{mapped_t}.png"), dpi=400)
+    plt.close()
+```
+
+Next, we compare the signal of the contrasts LN vs MF+EWMF and LN vs EW. 
+(Fig. 1D)
+
+```{python}
+plot_fc_diff(
+    limma_ew_ctrl,limma_mfewmf_ctrl,
+    xlabel="EW vs LN",ylabel="MF + EWMF vs LN", save_path=save_path_limma)
+```
+## Correlation of Plasma proteins with FBC (& ratios) and Loa microfilarial count
+
+We calculated spearman correlation coefficients between full blood counts, 
+their ratios and the micorfilarial loa count, a.o. Fig 1E.
+
+```{python}
+# create path
+save_path_ll =  f"results\loaloa\plots\prot_log2_llmf"
+if not os.path.exists(save_path_bc):
+    os.mkdir(save_path_bc)
+
+# Select only data with loa loa mf count > 0
+data[f"ll_mf_log2"] = np.log2(data[f"ll_mf"]+1)
+data_zero_ll = data[data["ll_mf_log2"]>0]
+corr_ll_mf = pd.DataFrame(
+    [spearmanr(
+        data_zero_ll[p], data_zero_ll["ll_mf"], 
+        nan_policy="omit") for p in common_proteins],
+    index=common_proteins).sort_values(by="statistic")
+corr_ll_mf["Genes"] = meta_table.loc[common_proteins, "Gene Names"]
+
+
+order=["MF", "EWMF"]
+colors=[
+    sns.color_palette('colorblind')[1], 
+    sns.color_palette('colorblind')[3], 
+]
+```
+
+Fig 1E
+
+```{python}
+fig, ax = plt.subplots(1,5, figsize=(12.5, 3))
+
+for i, p in enumerate([
+    "P01860", "P01861", "P13796",
+    "P60709", "P05543"]): 
+
+    df = data_sel
+    y=p
+    x="ll_mf_log2"
+    target="disease severity"
+
+    mapped_y = meta_table_proteins[meta_table_proteins.index == y]["Gene Names"].values[0]
+    # remove NA's
+    common_ids = list(set(df[x].dropna().index) & set(df[y].dropna().index))
+    df = df.copy()
+    df = df.loc[common_ids]
+    # fit linear model
+    m,b = np.polyfit(df.loc[:, x],df.loc[:, y],deg=1)
+    ax[i].plot(df.loc[:, x], m*df.loc[:, x].values+b, lw=2, c="k", ls="--")
+
+    sns.scatterplot(
+        ax=ax[i], data=df, x=x, y=y, hue=target, alpha=0.8, 
+        edgecolor="k", linewidth=1., legend=False, palette=colors,
+        hue_order=order)
+    ax[i].set_ylabel("")
+    ax[i].set_xlabel("")
+    ax[i].set_yticklabels(ax[i].get_yticklabels(), fontweight="bold")
+    ax[i].set_xticklabels(ax[i].get_xticklabels(), fontweight="bold")
+    s_rho, p = spearmanr(df.loc[common_ids, x],df.loc[common_ids, y])
+    ax[i].set_title(r'$\mathbf{{{}}}$ {}'.format(mapped_y.split(" ")[0], "\n $s_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.2f}"))
+    ax[i].grid()  
+ax[0].set_ylabel("$\\mathbf{log_2}$ protein abundance", 
+            fontweight="bold")
+ax[2].set_xlabel("$\\mathbf{log_2}$ Loa mf / ml", 
+         fontweight="bold")
+plt.tight_layout()
+plt.savefig(
+    os.path.join(
+        "results", "loaloa", "manuscript", "Fig1E.png"
+    ), dpi=400
+)
+```
+
+Plot Correlation Matrix for Proteins vs FBC
+
+```{python}
+bc_label_dict = {
+    "wbc":"WBC (abs.)",
+    "lym_abs": "Lymph. (abs.)",
+    "lymperc": "Lymph. (%)",
+    "neu_abs": "Neutro. (abs.)",
+    "neuperc": "Neutro. (%)",
+    "mon_abs": "Monocy. (abs.)",
+    "monperc": "Monocy. (%)",
+    "eos_abs": "Eos. (abs.)",
+    "eosperc": "Eos. (%)",
+    "bas_abs": "Bas. (abs.)",
+    "basperc": "Bas. (%)",
+    "NLR":"NLCR (-)",
+    "MLR":"MLCR (-)",
+    "ELR":"ELCR (-)",
+    "BLR":"BLCR (-)",
+    "hb": "Hb (abs.)",
+}
+```
+
+```{python}
+var = blood_counts
+protein_labels = [x.split(" ")[0] for x in meta_table.loc[common_proteins, "Gene Names"]]
+clinical_labels = [bc_label_dict[x] for x in var]
+
+# get p-values for corelations
+p_values_df = pd.DataFrame(
+    index=clinical_labels, 
+    columns=protein_labels)
+corr_df = pd.DataFrame(
+    index=clinical_labels, 
+    columns=protein_labels)
+for v in var:
+    for  p, pl in zip(
+    common_proteins, protein_labels
+    ):
+        p_values_df.loc[
+            bc_label_dict[v],
+            pl,
+        ] = spearmanr(
+            data[p],data[v],
+            nan_policy="omit" 
+        )[1]
+        corr_df.loc[
+            bc_label_dict[v],
+            pl,
+        ] = spearmanr(
+            data[p],data[v],
+            nan_policy="omit" 
+        )[0]
+# adj p_values with fdr benjamini-hochberg procedure
+p_values_adj_df = pd.DataFrame(
+    index=clinical_labels, 
+    columns=protein_labels)
+p_values_adj_df = pd.DataFrame(
+    columns=protein_labels,
+    index=clinical_labels)
+for c in range(p_values_df.shape[0]):
+    p_values = p_values_df.iloc[c,:].reset_index(drop=True)
+    non_nan_idx = p_values.notna()
+    _, corrected_p_values, _, _ = multipletests(p_values.loc[non_nan_idx], method='fdr_bh')
+    p_values_adj_df.iloc[c, non_nan_idx.index] = corrected_p_values
+
+# we drop all proteins from tthat do not have any significant correlations
+prot_idx_keep = ((p_values_adj_df.T.reset_index(drop=True).T < 0.05).sum()).replace({0:np.nan}).dropna()
+p_values_adj_df = p_values_adj_df.iloc[:, prot_idx_keep.index]
+
+
+corr_matrix = data.loc[:, var + list(common_proteins)].corr(method="spearman")
+corr_matrix = corr_matrix.loc[var, list(common_proteins)]
+corr_matrix.columns = protein_labels
+corr_matrix.index = clinical_labels
+corr_matrix = corr_matrix.iloc[:, prot_idx_keep.index]
+```
+
+```{python}
+g = sns.clustermap(
+    data = corr_matrix, 
+    cmap='vlag', fmt="", cbar=True,
+    row_cluster=False,
+    center=0, vmin=-.45, vmax=.45,
+    linewidths=.01,
+    figsize=(28,5),
+    annot_kws={"ha":"center", "va":"center"}, 
+    annot=(p_values_adj_df < 0.05).replace({True:"*", False:""}),
+    cbar_pos=[0.15, 0.53, 0.01, 0.4],
+    xticklabels=True, yticklabels=True
+    )
+for _, spine in g.ax_heatmap.spines.items():
+    spine.set_visible(True)
+g.ax_heatmap.set_xlabel("Proteins", fontweight='bold')
+g.ax_heatmap.set_ylabel(
+    "Clinical Variables", fontweight='bold')
+cbar = g.ax_heatmap.collections[0].colorbar
+cbar.set_label(
+    "Spearman's $\\bf{\\rho}$", weight='bold')
+plt.savefig(
+    os.path.join(res_path_plots, "correlation_clinicalVariables", "heatmap_corr_prot_clinicalVar.png"),
+    dpi=400
+    )
+```
+## Symptom Association
+
+We also invesitigated to what extent proteins were associated to self-reported 
+symptoms. Furthermore, patients in the EW group reported a higher symptom
+load than patients infected with microfilaria only. Consequently, we investigated
+to waht extent proteins show distinct pattern for the group asymptomatic LN, 
+symptomatic LN, asymptomatic EW and symptomatic EW.
+
+```{python}
+# Analysis was performed in R (differential_abundance_analysis.rmd)
+# Loading results and cleaning up columns
+
+fp_analysis = "results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge_05_newCat.xlsx"
+clinical_cat = list(cs_dict.keys()) + list(cs_dict_history.keys())
+res_cont_dict = {
+    c:pd.read_excel(fp_analysis, sheet_name=c) for c in clinical_cat 
+}
+for c in res_cont_dict.keys():
+    df = res_cont_dict[c]
+    # reorder columns 
+    df = df[[
+        "Uniprot", "Genes", 
+        "KW_statistic", "KW_p_value", "KW_adj_pvalue", 
+        "JT_statistic", "JT_p_value", "JT_adj_pvalue",
+        "median_ln_asympt", "median_ln_sympt", 
+        "median_ew_asympt", "median_ew_sympt",
+        "n_ln_asympt", "n_ln_sympt", "n_ew_asympt", "n_ew_sympt"
+        ]]
+
+    # check which symptoms and protiens have less than 10 samples in 
+    # one of the groups and assign nan values
+    idx_low_samples = (
+        (
+            df[["n_ln_asympt", "n_ln_sympt", "n_ew_asympt", "n_ew_sympt"]] < 10
+            ).sum(axis=1) > 0
+        )
+    df.iloc[idx_low_samples, 2:12] = np.nan
+    df["JT_adj_pvalue"] = np.nan
+    df["KW_adj_pvalue"] = np.nan
+    
+    non_na_mask = ~np.isnan(df["KW_p_value"])
+    if np.sum(non_na_mask) > 0:
+    # perform bonferroni adjustment
+        df.loc[non_na_mask, "JT_adj_pvalue"] = multipletests(df.loc[non_na_mask, "JT_p_value"], method="fdr_bh")[1]
+        df.loc[non_na_mask, "KW_adj_pvalue"] = multipletests(df.loc[non_na_mask, "KW_p_value"], method="fdr_bh")[1]
+    df = df.set_index("Uniprot")
+    res_cont_dict[c] = df
+```
+
+```{python}
+# calculate number of significant assocaitions 
+n_signif_kw = [sum(res_cont_dict[c]["KW_adj_pvalue"] <= 0.05) for c in clinical_cat ]
+n_signif_jt = [sum(res_cont_dict[c]["JT_adj_pvalue"] <= 0.05) for c in clinical_cat ]
+
+```
+
+```{python}
+symptoms_label_dict = {
+    'unspecific':"Unspecific",
+    'neurological':"Neurological",
+    'urticaria': "Urticaria",
+    'swelling_daily_life': "Swelling",
+    'myalgia_daily_life': "Myalgia",
+    'arthralgia_daily_life': "Arthralgia",
+    'pruritus_daily_life': "Pruritus",
+    }
+```
+
+Fig 2A
+```{python}
+## Heatmap
+
+# rows proteins
+# cols symptoms
+diff_df = pd.DataFrame()
+signif_jt_df = pd.DataFrame()
+signif_kw_df = pd.DataFrame()
+
+signif_prot_jt = []
+signif_prot_kw = []
+
+# Iterate over symptoms
+for s in res_cont_dict.keys():
+    # select symptom
+    df_sympt = res_cont_dict[s]
+    # calculate difference
+    diff =  df_sympt["median_ew_sympt"] - df_sympt["median_ln_asympt"]
+    # check for significant proteins
+    signif_jt = df_sympt["JT_adj_pvalue"] <= 0.05
+    signif_kw = df_sympt["KW_adj_pvalue"] <= 0.05
+    diff_df[s] = diff
+    signif_jt_df[s] = signif_jt
+    signif_kw_df[s] = signif_kw
+    # if signif proteins were found add tehm to list
+    if signif_jt.sum() >0:
+        signif_prot_jt.append(df_sympt[df_sympt["JT_adj_pvalue"] <= 0.05].index)
+    if signif_kw.sum() >0:
+        signif_prot_kw.append(df_sympt[df_sympt["KW_adj_pvalue"] <= 0.05].index)
+signif_prot_lst_jt = list(set(np.concatenate(signif_prot_jt)))
+signif_prot_lst_kw = list(set(np.concatenate(signif_prot_kw)))
+
+diff_df.columns = res_cont_dict.keys()
+signif_jt_df.columns = res_cont_dict.keys()
+signif_kw_df.columns = res_cont_dict.keys()
+diff_df.index = df_sympt.index
+signif_jt_df.index = df_sympt.index
+signif_kw_df.index = df_sympt.index
+
+diff_df = diff_df.loc[signif_prot_lst_jt]
+signif_jt_df = signif_jt_df.loc[signif_prot_lst_jt]
+signif_kw_df = signif_kw_df.loc[signif_prot_lst_kw]
+
+diff_df = diff_df.T
+signif_jt_df = signif_jt_df.T
+
+g = sns.clustermap(
+    diff_df.fillna(0), 
+    center=0, vmin=-0.8, vmax=0.8, cmap="vlag", 
+    col_cluster=True, row_cluster=False,
+    dendrogram_ratio=0.05, linewidths=.5,
+    cbar_pos=[0.0, 0.53, 0.01, 0.4],
+    annot=signif_jt_df.replace({True:"*", False:""}),
+    fmt="", annot_kws={"ha":"center", "va":"center", "size":25}, 
+    figsize=(28,6),
+    mask=diff_df.isna(),
+    yticklabels=[symptoms_label_dict[c] for c in diff_df.index])
+for _, spine in g.ax_heatmap.spines.items():
+    spine.set_visible(True)
+g.ax_heatmap.set_facecolor('gray')
+g.ax_heatmap.set_xlabel("Associated Proteins", fontweight='bold', size=14)
+yticklabels = []
+for label in g.ax_heatmap.get_xticklabels():
+    yticklabels.append(
+        meta_table.loc[label.get_text(), "Gene Names"].split(" ")[0]
+    )
+g.ax_heatmap.set_xticklabels(yticklabels, fontsize=14, fontweight="bold")
+g.ax_heatmap.set_yticklabels(g.ax_heatmap.get_yticklabels(), fontsize=14, fontweight="bold")
+g.ax_heatmap.set_ylabel("Reported Symptoms" , fontweight='bold', size=14)
+cbar = g.ax_heatmap.collections[0].colorbar
+cbar.set_label('log2 FC \n(EW sympt vs LN asympt.)', weight='bold', size=14)
+cbar.set_ticks([-0.8, -0.4, 0. , 0.4, 0.8])
+plt.savefig(
+    os.path.join(res_path_plots, "symptoms", "continuum_ln_ew_trend_jt_05newCat.png"),
+    dpi=400
+    )
+```
+
+```{python}
+path_res_stat_cont = os.path.join(
+    res_path_tables, "sympt_stat_analysis_comb_unadj_05_newCat.xlsx"
+)
+with pd.ExcelWriter(path_res_stat_cont) as writer:
+    for k in res_cont_dict.keys():
+        sn = symptoms_label_dict[k]
+        st = res_cont_dict[k]
+        # st.set_index("Uniprot", inplace=True)
+        st.to_excel(writer, sheet_name=sn, index=True)
+```
+Next, we plot boxplots for the different proteins.
+
+Among others, Fig 2C
+```{python}
+path_cont_boxplots= os.path.join(res_path_plots, "symptoms/continuum_ln_mf_ew_05_newCAT")
+data_mono = data[((data["infection"].isin(["INF", "LN"])) & (data["disease severity"].isin(["EW", "LN", "MF"])))]
+for c in signif_jt_df.index:
+    for t in signif_jt_df.columns:
+        if signif_jt_df.loc[c, t]:
+            plot_cont_sympt(
+                data_mono, res_cont_dict, c, t, path_cont_boxplots, add_info="_jt_05")
+for c in signif_kw_df.T.index:
+    for t in signif_kw_df.T.columns:
+        if signif_kw_df.T.loc[c, t]:
+            plot_cont_sympt(
+                data_mono, res_cont_dict, c, t, path_cont_boxplots, add_info="_kw_05")
+```
+
+Fig 2B
+
+```{python}
+import pandas as pd
+import igraph as ig
+import matplotlib.pyplot as plt
+import random
+import matplotlib.colors as mcolors
+
+
+df = signif_jt_df.copy()
+symptoms_label_dict_netw = {
+'unspecific': 'Fatique\n Headaches',
+ 'neurological': 'Paresthesia \n Paralysis',
+ 'urticaria': 'Urticaria',
+ 'swelling_daily_life': 'Swelling',
+ 'myalgia_daily_life': 'Myalgia',
+ 'arthralgia_daily_life': 'Arthralgia',
+ 'pruritus_daily_life': 'Pruritus'}
+df.index = [symptoms_label_dict_netw[x] for x in df.index]
+
+# Initialize igraph Graph
+g = ig.Graph()
+
+# Add symptoms as nodes
+g.add_vertices(df.index)
+
+# Calculate node sizes (number of proteins associated with each symptom)
+node_sizes = df.sum(axis=1).tolist()  # sum of True values per row (symptom)
+
+# Add edges and calculate weights based on shared proteins between symptoms
+edges = []
+weights = []
+edge_labels = []
+
+colors = ["gray" for i in range(len(df.index))]
+
+
+for i in range(len(df.index)):
+    for j in range(i + 1, len(df.index)):
+        symptom1 = df.index[i]
+        symptom2 = df.index[j]
+        proteins1 = df.loc[symptom1]
+        proteins2 = df.loc[symptom2]
+        
+        # Count shared proteins (True in both symptoms)
+        shared_proteins = (proteins1 & proteins2).sum()
+        
+        if shared_proteins > 0:
+            edges.append((i, j))
+            weights.append(shared_proteins)
+            edge_labels.append(shared_proteins)  # Store the number of shared proteins
+
+
+# Add edges to the graph
+g.add_edges(edges)
+
+# Set the edge weights
+g.es['weight'] = weights
+edges_sorted_by_weight = sorted(g.es, key=lambda e: e['weight'])
+# Plot the graph using igraph's plot functionality
+layout = g.layout("circle")  # force-directed layout
+fig, ax = plt.subplots(figsize=(8, 8))
+
+# Convert node sizes for visualization scaling
+visual_node_sizes = [size *2.8 for size in node_sizes]
+
+# Create a colormap (e.g., 'viridis' or 'coolwarm')
+norm_edge = plt.Normalize(vmin=min(weights), vmax=max(weights))
+cmap_edge = cm.ScalarMappable(norm=norm_edge, cmap='Reds')
+edge_colors = [cmap_edge.to_rgba(weight) for weight in weights]
+
+for i, edge in enumerate(edges_sorted_by_weight):
+    source, target = edge.source, edge.target
+    g.es[edge.index]["width"] = 15  # Adjust edge width based on weight
+
+
+# visual styling
+visual_style = {
+    "vertex_size": visual_node_sizes,
+    "vertex_color": colors,
+    "vertex_label_size": 12,
+    "vertex_frame_color": "black",
+    "vertex_label_angle": [i*2*np.pi for i in np.linspace(0,1,len(visual_node_sizes))],
+    "edge_color": edge_colors, 
+    "layout": layout,
+    "target": ax  # render the plot in matplotlib's figure
+}
+
+# plot graph
+ig.plot(g, **visual_style)
+cbar_edge = plt.colorbar(cmap_edge, ax=ax, orientation="horizontal")
+cbar_edge.set_label('Number of Overlapping Proteins', fontweight="bold", fontsize=12)
+cbar_edge.ax.set_xticklabels(labels=cbar_edge.ax.get_xticklabels(), weight='bold', size=12)
+
+plt.tight_layout()
+plt.savefig(os.path.join(res_path_plots, "symptoms", "graph_symptoms.png"), dpi=400)
+plt.show()
+```
+## Machine Learning
+
+### Balanced Groups
+
+We balanced different severity/manifestation groups by age groups and sex with
+R's matchit package.
+```{python}
+ids_ml_1 = pd.read_csv(
+    "data/analysis/loa/matched/data_matched_inf_ln_05.csv")["Sample ID"]
+ids_ml_2 = pd.read_csv(
+    "data/analysis/loa/matched/data_matched_ew_ln_05.csv")["Sample ID"]
+ids_ml_3 = pd.read_csv(
+    "data/analysis/loa/matched/data_matched_mfewmf_ln_05.csv")["Sample ID"]
+
+data_ml_1 = data_imp[data_imp["Sample ID"].isin(ids_ml_1)]
+data_ml_2 = data_imp[data_imp["Sample ID"].isin(ids_ml_2)]
+data_ml_3 = data_imp[data_imp["Sample ID"].isin(ids_ml_3)]
+```
+
+<!-- ```{python}
+data_ml_2 = data_ml_2[data_ml_2["disease severity"].isin(["LN", "EW"])]
+data_ml_3 = data_ml_3[data_ml_3["disease severity"].isin(["LN", "EWMF", "MF"])]
+``` -->
+
+
+```{python}
+# Select Features and Labels
+X_1 = data_ml_1[common_proteins_imp]
+X_2 = data_ml_2[common_proteins_imp]
+X_3 = data_ml_3[common_proteins_imp]
+
+# Encode Labels
+y_1 = data_ml_1["infection"].replace({"LN":0, "INF":1})
+y_2 = data_ml_2["disease severity"].replace({"LN":0, "EW":1})
+y_3 = data_ml_3["disease severity"].replace({"LN":0, "EWMF":1, "MF":1})
+```
+
+### Feature Selection
+
+We applied 3 different feature selection methods:
+- cumulative feature importance up to 0.7
+- mutual information
+- cross-validated recursive feature elimination
+
+```{python}
+# perform feature selection with Random Forest
+rf_1 = RandomForestClassifier(max_depth=2, random_state=RANDOM_STATE)
+rf_2 = RandomForestClassifier(max_depth=2, random_state=RANDOM_STATE)
+rf_3 = RandomForestClassifier(max_depth=2, random_state=RANDOM_STATE)
+
+# Fit on discovery cohort
+rf_1.fit(X_1, y_1)
+rf_2.fit(X_2, y_2)
+rf_3.fit(X_3, y_3)
+```
+
+```{python}
+# Feature selection
+th_expl_imp = 0.7
+
+## TOP KK
+top_feat_cumImp_1 = select_topF_imp(model=rf_1, th_expl_imp=th_expl_imp)
+top_feat_cumImp_2 = select_topF_imp(model=rf_2, th_expl_imp=th_expl_imp)
+top_feat_cumImp_3 = select_topF_imp(model=rf_3, th_expl_imp=th_expl_imp)
+
+## Mutual Information clf
+top_feat_mutInf_1 = select_topF_mutualinfo(X_1, y_1, th_exp_imp=th_expl_imp)
+top_feat_mutInf_2 = select_topF_mutualinfo(X_2, y_2, th_exp_imp=th_expl_imp)
+top_feat_mutInf_3 = select_topF_mutualinfo(X_3, y_3, th_exp_imp=th_expl_imp)
+
+# Recursive Feature Elimination
+sk = StratifiedKFold(n_splits=10, random_state=RANDOM_STATE, shuffle=True)
+sel_1 = RFECV(rf_1, step=5, cv=sk, verbose=False, min_features_to_select=10).fit(X_1, y_1)
+sel_2 = RFECV(rf_2, step=5, cv=sk, verbose=False, min_features_to_select=10).fit(X_2, y_2)
+sel_3 = RFECV(rf_3, step=5, cv=sk, verbose=False, min_features_to_select=10).fit(X_3, y_3)
+
+top_feat_rfe_1 = X_1.columns[sel_1.support_]
+top_feat_rfe_2 = X_2.columns[sel_2.support_]
+top_feat_rfe_3 = X_3.columns[sel_3.support_]
+```
+
+```{python}
+ml_path_plots = "results/loaloa/plots/ML_05"
+ml_path_tables = "results/loaloa/tables/ML_05"
+```
+
+First, we optimize the number of trees and node in the random forest - 
+after that we perform Leave-One-Out-CV.
+
+```{python}
+features_1 = [top_feat_cumImp_1, top_feat_mutInf_1, top_feat_rfe_1]
+features_2 = [top_feat_cumImp_2, top_feat_mutInf_2, top_feat_rfe_2]
+features_3 = [top_feat_cumImp_3, top_feat_mutInf_3, top_feat_rfe_3]
+
+best_scores_lst_1, best_params_lst_1, scores_lst_1 = [], [], []
+best_scores_lst_2, best_params_lst_2, scores_lst_2 = [], [], []
+best_scores_lst_3, best_params_lst_3, scores_lst_3 = [], [], []
+
+clf = RandomForestClassifier()
+param_grid = {
+    'max_depth': [2,3],
+    'n_estimators': list(range(1,101,10))
+}
+```
+
+```{python}
+
+for i in range(3): # Number of feature sets
+    X_1_feat = X_1[features_1[i]]
+    X_2_feat = X_2[features_2[i]]
+    X_3_feat = X_3[features_3[i]]
+
+    best_params_1, best_score_1, scores_1, param_values = optimize_clf_with_loocv(
+    X_1_feat, y_1, clf, param_grid, random_state=RANDOM_STATE, scoring='roc_auc',
+    )
+
+    best_params_lst_1.append(best_params_1)
+    best_scores_lst_1.append(best_score_1)
+    scores_lst_1.append(scores_1)
+
+    best_params_2, best_score_2, scores_2, param_values = optimize_clf_with_loocv(
+    X_2_feat, y_2, clf, param_grid, random_state=RANDOM_STATE, scoring='roc_auc',
+    )
+    best_params_lst_2.append(best_params_2)
+    best_scores_lst_2.append(best_score_2)
+    scores_lst_2.append(scores_2)
+
+    best_params_3, best_score_3, scores_3, param_values = optimize_clf_with_loocv(
+    X_3_feat, y_3, clf, param_grid, random_state=RANDOM_STATE, scoring='roc_auc',
+    )
+
+    best_params_lst_3.append(best_params_3)
+    best_scores_lst_3.append(best_score_3)
+    scores_lst_3.append(scores_3)
+
+# save models
+joblib.dump(
+    best_params_lst_1, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_params_ml_1.pkl"))
+joblib.dump(
+    best_params_lst_2, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_params_ml_2.pkl"))
+joblib.dump(
+    best_params_lst_3, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_params_ml_3.pkl"))
+joblib.dump(
+    best_scores_lst_1, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_scores_ml_1.pkl"))
+joblib.dump(
+    best_scores_lst_2, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_scores_ml_2.pkl"))
+joblib.dump(
+    best_scores_lst_3, os.path.join(
+        ml_path_tables, "loocv_opt", f"best_scores_ml_3.pkl"))
+```
+
+```{python}
+X_1_feat_ref = X_1[features_1[0]]
+param_grid_1 = {
+    'max_depth': [2,3],
+    'n_estimators': list(range(1,100,1))
+}
+
+
+X_2_feat_ref = X_2[features_2[0]]
+param_grid_2 = {
+    'max_depth': [2,3],
+    'n_estimators': list(range(1,100,1))
+}
+
+X_3_feat_ref = X_3[features_3[2]]
+param_grid_3 = {
+    'max_depth': [2,3],
+    'n_estimators': list(range(1,100,1))
+}
+```
+
+```{python}
+
+best_params_ref_1, best_score_ref_1, scores_ref_1, param_values_ref_1 = optimize_clf_with_loocv(
+X_1_feat_ref, y_1, clf, param_grid_1, random_state=RANDOM_STATE, scoring='roc_auc',
+)
+
+
+best_params_ref_2, best_score_ref_2, scores_ref_2, param_values_ref_2 = optimize_clf_with_loocv(
+X_2_feat_ref, y_2, clf, param_grid_2, random_state=RANDOM_STATE, scoring='roc_auc',
+)
+
+best_params_ref_3, best_score_ref_3, scores_ref_3, param_values_ref_3 = optimize_clf_with_loocv(
+X_3_feat_ref, y_3, clf, param_grid_3, random_state=RANDOM_STATE, scoring='roc_auc',
+)
+```
+
+
+```{python}
+# Conduct LOOCV:
+
+def perform_loocv(
+    X, y, clf, param_dict, random_state,):
+    
+    # Initialize Leave-One-Out Cross-Validation
+    loo = LeaveOneOut()
+
+    clf.set_params(**param_dict)  # Set clf parameters
+    
+    # adapt random state
+    if "random_state" in clf.get_params():
+        clf.set_params(**{"random_state":random_state})
+
+    y_pred_prob = []
+    y_preds = []
+    y_true = []
+    feature_importances = []
+
+    # LOOCV: Iterate over each train-test split
+    for train_idx, test_idx in loo.split(X):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        y_true.append(y_test)
+        # Train the clf on the current training set
+        clf.fit(X_train, y_train)
+
+        # Get predicted probabilities for clfs that support it
+        try:
+            y_pred_prob.append(float(clf.predict_proba(X_test)[:, -1]))
+        except AttributeError:
+            # Fallback if clf doesn't support `predict_proba`
+            y_pred_prob.append(float(clf.decision_function(X_test)))
+    
+        y_preds.append(int(clf.predict(X_test)))
+        feature_importances.append(clf.feature_importances_)
+    return y_pred_prob, y_preds, feature_importances
+
+
+# best_params_ref_1 = {'max_depth': 3, 'n_estimators': 39}
+# best_params_ref_2 = {'max_depth': 3, 'n_estimators': 70}
+# best_params_ref_3 = {'max_depth': 3, 'n_estimators': 85}
+
+y_pred_prob_1, y_preds_1, feat_imp_1 = perform_loocv(
+    X_1_feat_ref, y_1, clf, best_params_ref_1, random_state=RANDOM_STATE
+)
+y_pred_prob_2, y_preds_2, feat_imp_2 = perform_loocv(
+    X_2_feat_ref, y_2, clf, best_params_ref_2, random_state=RANDOM_STATE
+)
+y_pred_prob_3, y_preds_3, feat_imp_3 = perform_loocv(
+    X_3_feat_ref, y_3, clf, best_params_ref_3, random_state=RANDOM_STATE
+)
+```
+
+Store results ..
+
+```{python}
+pd.DataFrame({
+    "Sample_ID": data.loc[y_1.index, "Sample ID"],
+    "y_true":y_1,
+    "y_pred":y_preds_1,
+    "y_pred_prob":y_pred_prob_1
+}).to_csv(os.path.join(ml_path_tables, "res_table_1.csv"))
+pd.DataFrame({
+    "Sample_ID": data.loc[y_2.index, "Sample ID"],
+    "y_true":y_2,
+    "y_pred":y_preds_2,
+    "y_pred_prob":y_pred_prob_2
+}).to_csv(os.path.join(ml_path_tables, "res_table_2.csv"))
+pd.DataFrame({
+    "Sample_ID": data.loc[y_3.index, "Sample ID"],
+    "y_true":y_3,
+    "y_pred":y_preds_3,
+    "y_pred_prob":y_pred_prob_3
+}).to_csv(os.path.join(ml_path_tables, "res_table_3.csv"))
+```
+
+
+```{python}
+res_ml_1 = pd.read_csv(
+    os.path.join(ml_path_tables, "res_table_1.csv"), index_col=0)
+res_ml_2 = pd.read_csv(
+    os.path.join(ml_path_tables, "res_table_2.csv"), index_col=0)
+res_ml_3 = pd.read_csv(
+    os.path.join(ml_path_tables, "res_table_3.csv"), index_col=0)
+
+y_1, y_preds_1, y_pred_prob_1 = res_ml_1["y_true"], res_ml_1["y_pred"], res_ml_1["y_pred_prob"]
+y_2, y_preds_2, y_pred_prob_2 = res_ml_2["y_true"], res_ml_2["y_pred"], res_ml_2["y_pred_prob"]
+y_3, y_preds_3, y_pred_prob_3 = res_ml_3["y_true"], res_ml_3["y_pred"], res_ml_3["y_pred_prob"]
+```
+
+Calculate ROC Curves
+```{python}
+fpr_1, tpr_1, th_1 = roc_curve(y_1, y_pred_prob_1)
+fpr_2, tpr_2, th_2 = roc_curve(y_2, y_pred_prob_2)
+fpr_3, tpr_3, th_3 = roc_curve(y_3, y_pred_prob_3)
+```
+
+Recently, a loa parasite peptide was used to develop a ELISA based assay
+to detect loa infection in MF positive patients \ref{Greene2024}. 
+The authors report sensitivities of 0 (n=23), 29.4(n=17) and between 
+84-100 % (n=76) for patients with a mf count of <1000 mf/ml, 1000-7999 mf/ml 
+and >8000 mf/ml. 
+
+Here, we evaluate our ML models for sensitivity and report 71.02 (n=69), 
+78.95 (n=38) and 100 (n=19) % for the same groups.  
+
+```{python}
+data_ml_3["mf_bins"] = pd.cut(
+    data_ml_3["ll_mf"], 
+    bins=[0, 1000, 8000, 50000], 
+    labels=["<1000", "<8000", "<50000"])
+
+idx_all = data_ml_3[data_ml_3["mf_bins"].notna()].index
+idx_1k = data_ml_3[data_ml_3["mf_bins"]=="<1000"].index
+idx_8k = data_ml_3[data_ml_3["mf_bins"]=="<8000"].index
+idx_50k = data_ml_3[data_ml_3["mf_bins"]=="<50000"].index
+
+idx_allmf = data_ml_3[data_ml_3["mf_bins"].notna()].index
+
+tn, fp, fn, tp = confusion_matrix(y_3.loc[idx_all], pd.Series(y_preds_3, index=y_3.index).loc
+[idx_all]).ravel()
+sensitivity_all = tp / (tp + fn)
+
+tn, fp, fn, tp = confusion_matrix(y_3.loc[idx_1k], pd.Series(y_preds_3, index=y_3.index).loc
+[idx_1k]).ravel()
+sensitivity_1k = tp / (tp + fn)
+
+tn, fp, fn, tp = confusion_matrix(y_3.loc[idx_8k], pd.Series(y_preds_3, index=y_3.index).loc[idx_8k]).ravel()
+sensitivity_8k = tp / (tp + fn)
+```
+
+
+```{python}
+fig, ax = plt.subplots(1,1, figsize=(5,1))
+sns.histplot(ax=ax,
+    x=data_ml_3.loc[idx_allmf, "ll_mf"],
+    alpha=0.3, color=sns.color_palette("colorblind")[5], edgecolor="k", linewidth=1), 
+ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
+ax.set_xticklabels([])
+ax.set_xlabel("")
+ax.set_ylabel("N Pats.", fontweight="bold", fontsize=14)
+ax.set_xticks([])
+
+ax.spines[['right', 'top', "bottom"]].set_visible(False)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(ml_path_plots, "ml3_pred_prob_llmf_histpats.png"), 
+    dpi=400, transparent=True)
+plt.show()
+
+fig, ax = plt.subplots(1,1, figsize=(0.5,5))
+sns.histplot(ax=ax,
+    y=pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
+    alpha=0.3, color=sns.color_palette("colorblind")[5], edgecolor="k", linewidth=1),
+ax.set_yticklabels([])
+ax.set_xticklabels([])
+ax.set_xlabel("")
+ax.set_ylabel("")
+ax.set_xticks([])
+ax.set_yticks([])
+
+ax.spines[['right', 'top', "bottom", "left"]].set_visible(False)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(ml_path_plots, "ml3_pred_prob_llmf_histpredprob.png"), 
+    dpi=400, transparent=True)
+plt.show()
+
+fig, ax = plt.subplots(1,1, figsize=(5,5))
+data_ml_3["ll_mf_log10"] = np.log10(data_ml_3["ll_mf"])
+ax.scatter(
+    y=pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
+    x=data_ml_3.loc[idx_allmf, "ll_mf"],
+    alpha=0.3, ec="k", lw=0.5, c=sns.color_palette("colorblind")[5])
+ax.axhline(0.5, c="gray", ls="--", lw=2)
+ax.axvline(1000, c="gray", ls="--", lw=2)
+ax.axvline(8000, c="gray", ls="--", lw=2)
+ax.set_ylabel("$\\bf{\widetilde{P}\ (y=MF+EWMF)}$", fontweight="bold", fontsize=14)
+ax.set_xlabel("Loa MF count per ml", fontweight="bold", fontsize=14)
+ax.set_xticklabels(ax.get_xticklabels(), weight="bold")
+ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
+ax.grid()
+plt.legend(["Patient Sample"])
+spearmanr(
+    pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
+    data_ml_3.loc[idx_allmf, "ll_mf"])
+plt.savefig(os.path.join(ml_path_plots, "ml3_pred_prob_llmf.png"), dpi=400)
+plt.show()
+```
+
+
+Furthermore, we invesitage the sensitivity in the EW classifier.
+
+```{python}
+tn, fp, fn, tp = confusion_matrix(y_2, pd.Series(y_preds_2, index=y_2.index)).ravel()
+sensitivity_ew = tp / (tp + fn)
+
+idx_ew_rl_ly = data_ml_2[data_ml_2["rl_lastyear"]==1].index
+tn, fp, fn, tp = confusion_matrix(y_2.loc[idx_ew_rl_ly], pd.Series(y_preds_2, index=y_2.index).loc[idx_ew_rl_ly]).ravel()
+sensitivity_ew_rl_ly = tp / (tp + fn)
+```
+
+```{python}
+colors_contrasts = [
+    sns.color_palette("colorblind")[1],
+    "tab:red",
+    sns.color_palette("colorblind")[5]
+]
+contrasts = ["INF", "EW", "MF+EWMF"]
+
+plot_roc(
+    [fpr_1, fpr_2, fpr_3],
+    [tpr_1, tpr_2, tpr_3],
+    colors= colors_contrasts,
+    contrasts = contrasts,
+    save_path = ml_path_plots,
+    add_info ="_onlyValidation",
+    show_plot=True
+)
+```
+
+```{python}
+res_roc = pd.concat([
+    pd.DataFrame(
+        [th_1, th_2, th_3],
+        index = [f"Threshold_{c}" for c in contrasts ]).T.reset_index(drop=True),
+    pd.DataFrame(
+        [tpr_1, tpr_2, tpr_3],
+        index = [f"TPR_{c}" for c in contrasts ]).T.reset_index(drop=True),
+    pd.DataFrame(
+        [fpr_1, fpr_2, fpr_3],
+        index = [f"FPR_pos_{c}" for c in contrasts ]).T.reset_index(drop=True),
+    ], axis=1)
+res_roc.to_csv(os.path.join(ml_path_tables, "results_roc.csv"))
+```
+
+```{python}
+def plot_predicted_probability(
+    y_labels, predict_prob, colors, 
+    xticklabels, ylabel,
+    save_path,
+    show_plot=True):
+    fig, ax = plt.subplots(1,1,figsize=(2.5,2.5))
+    sns.boxplot(
+        data = pd.DataFrame({
+        "label":y_labels,
+        "prob":predict_prob,}), 
+        x="label", y="prob",
+        fill = False, palette=colors,
+        fliersize=0
+    )
+    sns.stripplot(data = pd.DataFrame({
+        "label":y_labels,
+        "prob":predict_prob,
+    }), x="label", y="prob",
+    palette=colors, alpha=0.3, edgecolor="k", linewidth=0.5,
+    )
+    ax.set_ylim([0.0, 1])
+    
+    # ax.set_yticklabels([0.0, 0.2, 0.4, 0.6, 0.8, 1], fontweight="bold")
+    ax.set_ylabel(ylabel, fontweight="bold")
+    ax.set_xticklabels(xticklabels, fontweight="bold")
+    ax.set_xlabel("")
+    plt.grid()
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'pred_prob{"vs".join(xticklabels)}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+
+plot_predicted_probability(
+    y_1, y_pred_prob_1,
+    colors=[
+        sns.color_palette("colorblind")[0], 
+        colors_contrasts[0]],
+    xticklabels=["LN", "INF."], ylabel="$\\bf{\widetilde{P}\ (y=INF)}$",
+    save_path=ml_path_plots)
+plot_predicted_probability(
+    y_2, y_pred_prob_2, 
+    colors=[
+        "tab:blue", 
+        colors_contrasts[1]],
+    xticklabels=["LN", "EW"], ylabel="$\\bf{\widetilde{P}\ (y=EW)}$",
+    save_path=ml_path_plots)
+plot_predicted_probability(
+    y_3, y_pred_prob_3, 
+    colors=[
+        sns.color_palette("colorblind")[0], 
+        colors_contrasts[2]],
+    xticklabels=["LN", "MF+EWMF"], ylabel="$\\bf{\widetilde{P}\ (y=MF+EWMF)}$",
+    save_path=ml_path_plots)
+```
+
+Plot Feature importance of Random Forest Models.
+
+```{python}
+feat_imp_df_1 = pd.DataFrame(
+    feat_imp_1, 
+    columns=meta_table.loc[X_1_feat_ref.columns, "Gene Names"])
+feat_imp_df_2 = pd.DataFrame(
+    feat_imp_2, 
+    columns=meta_table.loc[X_2_feat_ref.columns, "Gene Names"])
+feat_imp_df_3 = pd.DataFrame(
+    feat_imp_3, 
+    columns=meta_table.loc[X_3_feat_ref.columns, "Gene Names"])
+```
+
+```{python}
+def plot_featimp(
+    feat_imp, color, save_path, add_info, show_plot=True, topk=15
+):  
+    y_ticklabels = [x.split(" ")[0] for x in feat_imp.columns]
+    feat_imp = feat_imp.loc[:, feat_imp.mean().sort_values().index[::-1]]
+
+    feat_imp = feat_imp.iloc[:, :topk].melt()
+    alphas = np.linspace(1, 0.2, len(feat_imp))
+    fig, ax = plt.subplots(1,1,figsize=(2.5,2.5))
+
+    bars = sns.barplot(ax=ax,
+        data = feat_imp,
+        x="value",
+        y="Gene Names",
+        orient="y", 
+        color=color,
+        saturation=0.9,
+    )
+    for i, bar in enumerate(bars.patches):
+        bar.set_alpha(alphas[i])
+    ax.set_yticklabels(y_ticklabels, fontweight="bold")
+    ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
+    ax.set_ylabel("", fontweight="bold")
+    ax.set_xlabel("Feat. Imp", fontweight="bold")
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'feat_imp{add_info}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+plot_featimp(
+    feat_imp_df_1, colors_contrasts[0], 
+    save_path=ml_path_plots, add_info="LNvsINF")
+plot_featimp(
+    feat_imp_df_2.iloc[:, :15], colors_contrasts[1], 
+    save_path=ml_path_plots, add_info="LNvsEW")
+plot_featimp(
+    feat_imp_df_3.iloc[:, :15], colors_contrasts[2], 
+    save_path=ml_path_plots, add_info="LNvsMF+EWMF")
+```
+
+
+Next, we assessed how sensitive our ML models are with respect to detection
+of L. Loa infection in different groups of microfilarial burden and eyeworm.
+```{python}
+data_ml_3["mf_bins"] = pd.cut(
+    data_ml_3["ll_mf"], 
+    bins=[0, 1000, 8000, 50000], 
+    labels=["<1000", "<8000", "<50000"])
+
+idx_all = data_ml_3[data_ml_3["mf_bins"].notna()].index
+idx_1k = data_ml_3[data_ml_3["mf_bins"]=="<1000"].index
+idx_8k = data_ml_3[data_ml_3["mf_bins"]=="<8000"].index
+idx_50k = data_ml_3[data_ml_3["mf_bins"]=="<50000"].index
+
+idx_allmf = data_ml_3[data_ml_3["mf_bins"].notna()].index
+
+
+
+tn, fp, fn, tp = confusion_matrix(
+    y_3.loc[idx_all], pd.Series(y_preds_3, index=y_3.index).loc
+[idx_all]).ravel()
+sensitivity_all = tp / (tp + fn)
+
+tn, fp, fn, tp = confusion_matrix(
+    y_3.loc[idx_1k], pd.Series(y_preds_3, index=y_3.index).loc
+[idx_1k]).ravel()
+sensitivity_1k = tp / (tp + fn)
+
+tn, fp, fn, tp = confusion_matrix(
+    y_3.loc[idx_8k], pd.Series(y_preds_3, index=y_3.index).loc[idx_8k]).ravel()
+sensitivity_8k = tp / (tp + fn)
+tn, fp, fn, tp = confusion_matrix(
+    y_3.loc[idx_50k], pd.Series(y_preds_3, index=y_3.index).loc[idx_50k]).ravel()
+sensitivity_50k = tp / (tp + fn)
+```
+
+Figure 3B
+```{python}
+
+fig, ax = plt.subplots(1,1, figsize=(5,1))
+sns.histplot(
+    ax=ax,x=data_ml_3.loc[idx_allmf, "ll_mf"],
+    alpha=0.3, color=sns.color_palette("colorblind")[5], 
+    edgecolor="k", linewidth=1),
+ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
+ax.set_xticklabels([])
+ax.set_xlabel("")
+ax.set_ylabel("N Pats.", fontweight="bold", fontsize=14)
+ax.set_xticks([])
+ax.spines[['right', 'top', "bottom"]].set_visible(False)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(ml_path_plots, "ml3_pred_prob_llmf_histpats.png"), 
+    dpi=400, transparent=True)
+plt.show()
+```
+
+Plots for selected Marker shown in Figure 1C.
+
+```{python}
+order = ["LN", "EW", "EWMF", "MF"]
+colors = [
+    "tab:blue", 
+    "tab:red",
+    sns.color_palette('colorblind')[1], 
+    sns.color_palette('colorblind')[3], 
+    ]
+fig, axs = plt.subplots(2,2, figsize=(5, 5))
+for i, (p, ax) in enumerate(zip(
+    ["P01860", "P01861", "P13796", "P60709"], 
+    axs.ravel())):  
+    mapped_t = meta_table.loc[p, "Gene Names"].split(" ")[0]
+    sns.boxplot(ax=ax,
+        data=data, y=p, x="disease severity", order=order,
+        fill=False, fliersize=0, palette=colors)
+    sns.stripplot(ax=ax,
+        data=data, y=p, x="disease severity", order=order,
+        palette=colors, edgecolor="gray", linewidth=1, alpha=.1)
+    ax.set_ylabel("")
+    ax.set_xlabel("")
+    ax.set_xticklabels(order, fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold")
+    ax.set_title(mapped_t, fontweight="bold")
+    ax.grid()
+fig.supylabel("$\\mathbf{log_2}$ protein abundance", 
+            fontweight="bold")
+plt.tight_layout()
+plt.savefig(os.path.join(
+    ml_path_plots, f"Fig1C.png"),
+    dpi=400
+)
+plt.show()
+```
+
+Since IGHG4 is by far the most important feature to distinguish LN from MF+EWMF. 
+We check sensitivity and auroc only for ths protein.
+
+```{python}
+fpr_3_igg4, tpr_3_igg4, th_3_igg4 = roc_curve(y_3, data_ml_3["P01861"])
+roc_auc_score(y_3, data_ml_3["P01861"])
+
+plot_roc(
+    [fpr_3_igg4],
+    [tpr_3_igg4],
+    colors= ["tab:blue"],
+    contrasts = ["LN vs MF+EWMF, IGG4"],
+    save_path = ml_path_plots,
+    add_info ="_onlyIGG4_ml3",
+    show_plot=True
+)
+
+## save results
+roc_igg4 = pd.DataFrame({
+    "TH":th_3_igg4,
+    "FPR":fpr_3_igg4, 
+    "TPR":tpr_3_igg4, 
+    "Youden_J": tpr_3_igg4-fpr_3_igg4
+})
+
+# highest youden's index at log2 protein abundance of 19.46 - J = 0.51
+th_igg4 = roc_igg4.sort_values(by="Youden_J")["TH"].iloc[-1]
+y_igg4 = [1 if x > th_igg4 else 0 for x in data_ml_3["P01861"]]
+
+tn, fp, fn, tp = confusion_matrix(
+    y_3, pd.Series(y_igg4, index=y_3.index)).ravel()
+sensitivity_all_igg4 = tp / (tp + fn)
+```

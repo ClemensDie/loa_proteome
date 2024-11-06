@@ -1,0 +1,51 @@
+---
+title: "Analysis of the human host response to Loa Loa infection, Supplement"
+authors: "Clemens Dierks, Pinkus Tober-Lau"
+orcid: 0000-0002-4560-8939
+email: clemens.dierks@charite.de 
+date: last-modified 
+format: 
+    html:
+        code-fold: true
+        code-overflow: wrap
+        code-tools: true
+        graphics: yes
+        toc: true
+        toc-location: left-body
+        toc-title: "Outline"
+        html-math-method: katex
+bibliography: references.bib
+bibliographystyle: ieee
+---
+
+How to include Latex Front page and header etc?
+Create latex code for tables with python?
+mention Excel tables
+
+## Introduction
+This script creates the supplementary material pdf for the mansucript
+regarding the proteomic analysis of the loa loa host repsonse. 
+
+
+## Technical Description
+- Feature Distributions?
+- CV Violin plots
+- Technical Metatable (Uniprot Ids, Gene Names)
+
+## Differential Expression Analysis
+- Excel tables Limma (add description/Legend on first sheet)
+- Correlations with Eosinophils llmf other fbs
+- Volcano plots of every contrast
+- Scatter plot of other combinations
+- Correlation heatmap FBC and proteins
+
+## Symptom Analysis
+- Excel tables tests (add description/Legend on first sheet)
+
+## Machine Learning
+- Table Age, Sex and Target distribution for contrast groups
+- Table Hyperparameter Search Space for Gridsearch + Explanation of Paramters
+- Table Chosen Hyperparameter from Gridsearch
+- Excel Table FPR, TPR, LR+, LR-, TH
+
+
