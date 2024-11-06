@@ -32,6 +32,9 @@ We also perform a trend analysis across distinct groups: control
 asymptomatic, control symptomatic, EW asymptomatic, and EW symptomatic.
 Subsequent analysis will be carried out in Python.
 
+In this script we use the data set, in which all LN with eos > 0.5 were
+removed.
+
 ## Libraries
 
 ```{r message=FALSE, warning=FALSE}
@@ -48,6 +51,7 @@ Subsequent analysis will be carried out in Python.
 # install.packages("CBPS")
 # install.packages("knitr")
 # install.packages("twang")
+# install.packages("tidyr")
 ```
 
 ```{r message=FALSE, warning=FALSE}
@@ -62,6 +66,7 @@ library(openxlsx)
 library(writexl)
 library(CBPS)
 library(twang)
+library(tidyr)
 
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -71,7 +76,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r warning=FALSE}
 # load data
 
-preprocessed_file_path <- "../../../../data/analysis/loa/loa_data.csv"
+preprocessed_file_path <- "../../../../data/analysis/loa/loa_data_05.csv"
 data <- read.table(preprocessed_file_path, sep=",", header = T, check.names = F)
 
 # get protein names
@@ -83,7 +88,7 @@ row.names(proteins) <- NULL
 protein_map <- proteins[4:length(row.names(proteins)),1:2]
 
 # common uniprot ids
-common_uniprot <- colnames(data)[94:367]
+common_uniprot <- colnames(data)[94:366]
 common_genenames <- protein_map %>% filter(Protein.Group %in% common_uniprot)
 common_genenames <- protein_map %>% filter(Protein.Group %in% common_uniprot)
 common_genenames <- common_genenames$Genes
@@ -102,9 +107,11 @@ as age and sex differences between LN and the severity levels. We use
 matching to balance age and sex effects in our cohort. Therefore we
 balance every comparison separately.
 
-### 1: LN (m=201) vs INF (274) 
+### 1: INF and Severity levels vs LN 
+We match the larger INF group to the smaller LN group for the differential
+exepression analysis and add EW vs LN and MF vs LN as data to build
+machine learning models.
 
-### We match the larger INF group to the smaller LN group.
 
 ```{r warning=FALSE}
 data_m <- data
@@ -122,6 +129,63 @@ m <- matchit(
 
 data_matched <- match.data(m)
 data_matched$infection <- ifelse(data_matched$infection == 1, "LN", "INF")
+
+ggplot(data_m, aes(x = infection, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = infection, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = infection, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = infection, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+data_ln_inf <- data_matched
+write.csv(data_matched, 
+          "../../../../data/analysis/loa/matched/data_matched_inf_ln_05.csv")
+```
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("LN", "EW"))
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$disease_severity <- ifelse(data_m$disease_severity == "EW", 1, 0)
+
+
+m <- matchit(
+  disease_severity ~ age_group + sex , data = data_m, method = "nearest", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "EW", "LN")
 
 ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
   geom_histogram(stat = "count", position = "fill", color = "black") +
@@ -159,11 +223,262 @@ ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
   theme_minimal()
 
 # Export data
-data_ln_inf <- data_matched
+data_ln_ew <- data_matched
 write.csv(data_matched, 
-          "../../../../data/analysis/loa/matched/data_matched_inf_ln.csv")
+          "../../../../data/analysis/loa/matched/data_matched_ew_ln_05.csv")
 ```
 
+```{r warning=FALSE}
+data_m <- data
+data_m <- data_m %>% filter(disease_severity %in% c("LN", "MF", "EWMF"))
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$disease_severity <- ifelse(data_m$disease_severity == "LN", 0, 1)
+
+
+m <- matchit(
+  disease_severity ~ age_group + sex , data = data_m, method = "nearest", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "LN", "MF_EWMF")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+data_ln_mfewmf <- data_matched
+write.csv(data_matched, 
+          "../../../../data/analysis/loa/matched/data_matched_mfewmf_ln_05.csv")
+```
+#### Asymptomatic LN
+Also LN suffer have reported a high number of symptoms. To establish a 
+"healthier" baseline group, we remove all samples that suffer from 
+pruritus, calabar swelling and paralysis.
+
+```{r}
+data$pru_distribution <- replace_na(data$pru_distribution, 0)
+data$paralysis <- replace_na(data$paralysis, 0)
+data$cs_history <- replace_na(data$cs_history, 0)
+
+data_sym_m <- data %>% 
+  filter(
+    (infection == "INF") |
+      (infection == "LN" & pru_distribution !=1 &  paralysis != 1 & cs_history != 1))
+
+```
+
+```{r}
+data_m <- data_sym_m
+
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$infection <- ifelse(data_m$infection == "LN", 1, 0)
+
+
+m <- matchit(
+  infection ~ age_group , data = data_m, method = "optimal", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$infection <- ifelse(data_matched$infection == 1, "LN", "INF")
+
+ggplot(data_m, aes(x = infection, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = infection, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = infection, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = infection, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+data_lnAsymp_inf <- data_matched
+write.csv(data_matched, 
+          "../../../../data/analysis/loa/matched/data_matched_inf_lnAsymp_05.csv")
+```
+```{r}
+data_m <- data_sym_m
+data_m <- data_m %>% filter(disease_severity %in% c("LN", "EW"))
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$disease_severity <- ifelse(data_m$disease_severity == "EW", 1, 0)
+
+
+m <- matchit(
+  disease_severity ~ age_group + sex , data = data_m, method = "optimal", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "EW", "LN")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+data_ew_lnAsymp <- data_matched
+write.csv(data_matched, 
+          "../../../../data/analysis/loa/matched/data_matched_ew_lnAsymp_05.csv")
+```
+
+
+```{r}
+data_m <- data_sym_m
+data_m <- data_m %>% filter(disease_severity %in% c("LN", "MF", "EWMF"))
+data_m$age_group <- as.numeric(as.factor(data_m$age_group))
+data_m$sex <- as.numeric(as.factor(data_m$sex))
+
+data_m$disease_severity <- ifelse(data_m$disease_severity == "LN", 0, 1)
+
+
+m <- matchit(
+  disease_severity ~ age_group + sex , data = data_m, method = "nearest", ratio=1
+)
+
+
+data_matched <- match.data(m)
+data_matched$disease_severity <- ifelse(data_matched$disease_severity == 1, "LN", "MF_EWMF")
+
+ggplot(data_m, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(age_group))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Age Groups") +
+  scale_fill_manual(values = c("#acd8a7", "#46923c", "#276221"), 
+                    labels = c("<34", ">34 & <60", ">60")) +
+  theme_minimal()
+ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "Before Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
+  geom_histogram(stat = "count", position = "fill", color = "black") +
+  labs(title = "After Matching", 
+       x = "Severity", 
+       y = "Frequency", 
+       fill = "Sex") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+  theme_minimal()
+
+# Export data
+data_lnasymp_mfewmf <- data_matched
+write.csv(data_matched, 
+          "../../../../data/analysis/loa/matched/data_matched_mf_lnAsymp_05.csv")
+```
+
+
+
+### 2: Severity Levels
 Next, we match between the severity groups. We start with MF vs EW, ..
 
 ```{r warning=FALSE}
@@ -222,7 +537,7 @@ ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
 data_mf_ew <- data_matched
 write.csv(
   data_matched, 
-  "../../../../data/analysis/loa/matched/data_matched_mf_ew.csv")
+  "../../../../data/analysis/loa/matched/data_matched_mf_ew_05.csv")
 ```
 
 ... followed by MF and EWMF ...
@@ -283,7 +598,7 @@ ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
 data_mf_ewmf <- data_matched
 write.csv(
   data_matched, 
-  "../../../../data/analysis/loa/matched/data_matched_mf_ewmf.csv")
+  "../../../../data/analysis/loa/matched/data_matched_mf_ewmf_05.csv")
 ```
 
 ... followed by MF and EWMF ...
@@ -345,7 +660,7 @@ ggplot(data_matched, aes(x = disease_severity, fill = factor(sex))) +
 data_ew_ewmf <- data_matched
 write.csv(
   data_matched, 
-  "../../../../data/analysis/loa/matched/data_matched_ew_ewmf.csv")
+  "../../../../data/analysis/loa/matched/data_matched_ew_ewmf_05.csv")
 ```
 
 Since we are comparing symptomatic to asymptomatic LN and EW, we
@@ -378,7 +693,7 @@ ggplot(data_m, aes(x = disease_severity, fill = factor(sex))) +
   scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
   theme_minimal()
 ```
-
+### 3: Sex differences
 Finally, we balance age within the severity groups to analyse whether
 whether there are immunological differences between men and women for EW
 or MF.
@@ -424,7 +739,7 @@ data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
 data_mf_sex <- data_matched
 write.csv(
   data_mf_sex, 
-  "../../../../data/analysis/loa/matched/data_matched_mf_sex.csv")
+  "../../../../data/analysis/loa/matched/data_matched_mf_sex_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -469,7 +784,7 @@ data_m$sex <- ifelse(data_m$sex == 0, "Women", "Men")
 data_ewmf_sex <- data_m
 # write.csv
   #data_matched, 
-  #"../../../../data/analysis/loa/matched/data_matched_ewmf_sex.csv")
+  #"../../../../data/analysis/loa/matched/data_matched_ewmf_sex_05.csv")
 ```
 
 Since Balancding does not lead to closer distributions, we do not match
@@ -513,7 +828,7 @@ data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
 data_ew_sex <- data_matched
 write.csv(
   data_matched, 
-  "../../../../data/analysis/loa/matched/data_matched_ew_sex.csv")
+  "../../../../data/analysis/loa/matched/data_matched_ew_sex_05.csv")
 ```
 
 Finally, we match age groups within the
@@ -559,8 +874,11 @@ data_matched$sex <- ifelse(data_matched$sex == 0, "Women", "Men")
 data_ln_sex <- data_matched
 write.csv(
   data_matched, 
-  "../../../../data/analysis/loa/matched/data_matched_ln_sex.csv")
+  "../../../../data/analysis/loa/matched/data_matched_ln_sex_05.csv")
 ```
+
+
+
 
 ## Differential Expression Analysis
 
@@ -592,14 +910,73 @@ cont.matrix_infection <- makeContrasts(
 fit2_infection <- contrasts.fit(fit_infection, cont.matrix_infection)
 fit3_infection <- eBayes(fit2_infection, trend = T)
 
-res_infection <- topTable(fit3_infection, n=Inf, adjust="BH")
+res <- topTable(fit3_infection, n=Inf, adjust="BH")
 
 rownames(protein_map) <- protein_map$Protein.Group
-res_infection$genes <- protein_map[row.names(res_infection), "Genes"]
+res$genes <- protein_map[row.names(res), "Genes"]
 
 write.csv(
-  res_infection, 
-  "../../../../results/loaloa/tables/dea_limma/ln_infected.csv")
+  res, 
+  "../../../../results/loaloa/tables/dea_limma/ln_infected_05.csv")
+```
+
+### LN vs EW
+
+```{r warning=FALSE}
+design_severity <- model.matrix(~0+disease_severity, data=data_ln_ew)
+colnames(design_severity) <- gsub("disease_severity", "", colnames(design_severity))
+
+data_ln_ew[,colnames(data_ln_ew) %in% common_uniprot] <- as.data.frame(
+  sapply(data_ln_ew[colnames(data_ln_ew) %in% common_uniprot], as.numeric))
+fit_severity <- lmFit(
+  t(data_ln_ew[,colnames(data_ln_ew) %in% common_uniprot]), 
+  design = design_severity)
+
+cont.matrix_severity <- makeContrasts(
+  EW-LN,
+  levels=design_severity)
+
+fit2_severity <- contrasts.fit(fit_severity, cont.matrix_severity)
+fit3_severity <- eBayes(fit2_severity, trend = T)
+
+res_ln_ew <- topTable(fit3_severity, n=Inf, adjust="BH")
+
+rownames(protein_map) <- protein_map$Protein.Group
+res_ln_ew$genes <- protein_map[row.names(res_ln_ew), "Genes"]
+
+write.csv(
+  res_ln_ew, 
+  "../../../../results/loaloa/tables/dea_limma/ln_ew_05.csv")
+```
+
+
+### LN vs EWMF + MF
+
+```{r warning=FALSE}
+design_severity <- model.matrix(~0+infection, data=data_ln_mfewmf)
+colnames(design_severity) <- gsub("infection", "", colnames(design_infection))
+
+data_ln_mfewmf[,colnames(data_ln_mfewmf) %in% common_uniprot] <- as.data.frame(
+  sapply(data_ln_mfewmf[colnames(data_ln_mfewmf) %in% common_uniprot], as.numeric))
+fit_severity <- lmFit(
+  t(data_ln_mfewmf[,colnames(data_ln_mfewmf) %in% common_uniprot]), 
+  design = design_severity)
+
+cont.matrix_severity <- makeContrasts(
+  INF-LN,
+  levels=design_severity)
+
+fit2_severity <- contrasts.fit(fit_severity, cont.matrix_severity)
+fit3_severity <- eBayes(fit2_severity, trend = T)
+
+res_ln_mfewmf <- topTable(fit3_severity, n=Inf, adjust="BH")
+
+rownames(protein_map) <- protein_map$Protein.Group
+res_ln_mfewmf$genes <- protein_map[row.names(res_ln_mfewmf), "Genes"]
+
+write.csv(
+  res_ln_mfewmf, 
+  "../../../../results/loaloa/tables/dea_limma/ln_mfewmf_05.csv")
 ```
 
 ### Severity Groups
@@ -626,9 +1003,13 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
+
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/mf_ew.csv")
+  "../../../../results/loaloa/tables/dea_limma/mf_ew_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -653,9 +1034,11 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/mf_ewmf.csv")
+  "../../../../results/loaloa/tables/dea_limma/mf_ewmf_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -680,9 +1063,11 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/ew_ewmf.csv")
+  "../../../../results/loaloa/tables/dea_limma/ew_ewmf_05.csv")
 ```
 
 ### Analysis of immunological differences in Men and Women
@@ -714,9 +1099,11 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/mf_sex.csv")
+  "../../../../results/loaloa/tables/dea_limma/mf_sex_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -748,9 +1135,11 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/ewmf_sex.csv")
+  "../../../../results/loaloa/tables/dea_limma/ewmf_sex_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -780,9 +1169,11 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/ew_sex.csv")
+  "../../../../results/loaloa/tables/dea_limma/ew_sex_05.csv")
 ```
 
 ```{r warning=FALSE}
@@ -813,98 +1204,103 @@ fit2 <- contrasts.fit(fit, cont.matrix)
 fit3 <- eBayes(fit2, trend = T, robust = T)
 
 res <- topTable(fit3, n=Inf, adjust="BH", coef = 1)
+rownames(protein_map) <- protein_map$Protein.Group
+res$genes <- protein_map[row.names(res), "Genes"]
 write.csv(
   res, 
-  "../../../../results/loaloa/tables/dea_limma/ln_sex.csv")
+  "../../../../results/loaloa/tables/dea_limma/ln_sex_05.csv")
 ```
+
 
 ## Trend Analysis of LN and EW positive patients
 
 ```{r}
-# data <- as.data.frame(data)
-# 
-# clinical_symptoms_bin <- colnames(data)[377:406]
-# 
-# df_res_list <- list()
-# 
-# for (i in 1:length(clinical_symptoms_bin)) {
-#   c <- clinical_symptoms_bin[i]
-#   print(c)
-#   
-#     
-#   data_symp <- data[
-#     (
-#       data[c] == "LN asympt.") | (data[c] == "LN sympt.") | (data[c] == "EW asympt.") | (data[c] == "EW sympt."),]
-#   data_symp[data_symp[c] == "LN asympt.", c] = 1
-#   data_symp[data_symp[c] == "LN sympt.", c] = 2
-#   data_symp[data_symp[c] == "EW asympt.", c] = 3
-#   data_symp[data_symp[c] == "EW sympt.", c] = 4
-#   
-#   # Functions to conduct kruskal wallis and jonkheere - terpstra test
-#   kw_protein <- function(p_col, g_col) {
-#     # vec <- split(data_symp[[p_col]], data_symp[[g_col]])
-#     # print(vec)
-#     df <- data_symp[complete.cases(data_symp[, p_col]),]
-#     test_res <- kruskal.test(x=df[,p_col], g=as.numeric(df[,g_col]))
-#     
-#     # test_res <- kruskal.test(vec)
-#     return(
-#       list(
-#         KW_statistic = test_res$statistic,
-#         KW_p_value = test_res$p.value,
-#         n_ln_asympt = dim(df[df[g_col]==1,])[1],
-#         n_ln_sympt = dim(df[df[g_col]==2,])[1],
-#         n_ew_asympt = dim(df[df[g_col]==3,])[1],
-#         n_ew_sympt = dim(df[df[g_col]==4,])[1],
-#         median_ln_asympt = median(df[df[g_col]==1, p_col]),
-#         median_ln_sympt = median(df[df[g_col]==2, p_col]),
-#         median_ew_asympt = median(df[df[g_col]==3, p_col]),
-#         median_ew_sympt = median(df[df[g_col]==4, p_col])
-#       )
-#     )
-#   }
-#   jt_protein <- function(p_col, g_col, order) {
-#     df <- data_symp[complete.cases(data_symp[, p_col]),]
-#     test_res <- jonckheere.test(
-#       x=df[,p_col], g=as.numeric(df[,g_col]), nperm = 1000)
-#     return(
-#       list(
-#         JT_statistic = test_res$statistic,
-#         JT_p_value = test_res$p.value
-#       )
-#     )
-#   }
-#   
-#   # apply tests to each protein
-#   results_list_kruskal <- lapply(common_uniprot, function (p_col) {
-#     kw_protein(p_col, c)
-#   })
-#   
-#   results_list_jonkheere <- lapply(common_uniprot, function (p_col) {
-#     jt_protein(p_col, c)
-#   })
-#   
-#   results_df_kruskal <- do.call(
-#     rbind, lapply(results_list_kruskal, as.data.frame))
-#   results_df_kruskal$KW_adj_pvalue <- p.adjust(
-#     results_df_kruskal$KW_p_value, method = "BH")
-#   
-#   results_df_jonkheere <- do.call(
-#     rbind, lapply(results_list_jonkheere, as.data.frame))
-#   results_df_jonkheere$JT_adj_pvalue <- p.adjust(
-#     results_df_jonkheere$JT_p_value, method = "BH")
-#   
-#   res_kw_jt <- cbind(results_df_kruskal, results_df_jonkheere)
-#   res_kw_jt$Uniprot <- common_uniprot
-#   res_kw_jt$Genes <- common_genenames
-#   
-#   # collect results in list of dataframes
-#   c_temp <- gsub("_severity", "", clinical_symptoms_bin[i])
-#   df_res_list[[c_temp]] <- res_kw_jt
-# 
-# }
-# # Export  
-# write.xlsx(
-#   df_res_list, 
-#   "../../../../results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge.xlsx")
+data <- as.data.frame(data)
+
+clinical_symptoms_bin <- colnames(data)[382:388]
+
+df_res_list <- list()
+
+clinical_symptoms_bin
+
+for (i in 1:length(clinical_symptoms_bin)) {
+  c <- clinical_symptoms_bin[i]
+  print(c)
+
+
+  data_symp <- data[
+    (
+      data[c] == "LN asympt.") | (data[c] == "LN sympt.") | (data[c] == "EW asympt.") | (data[c] == "EW sympt."),]
+  data_symp[data_symp[c] == "LN asympt.", c] = 1
+  data_symp[data_symp[c] == "LN sympt.", c] = 2
+  data_symp[data_symp[c] == "EW asympt.", c] = 3
+  data_symp[data_symp[c] == "EW sympt.", c] = 4
+
+  # Functions to conduct kruskal wallis and jonkheere - terpstra test
+  kw_protein <- function(p_col, g_col) {
+    # vec <- split(data_symp[[p_col]], data_symp[[g_col]])
+    # print(vec)
+    df <- data_symp[complete.cases(data_symp[, p_col]),]
+    test_res <- kruskal.test(x=df[,p_col], g=as.numeric(df[,g_col]))
+
+    # test_res <- kruskal.test(vec)
+    return(
+      list(
+        KW_statistic = test_res$statistic,
+        KW_p_value = test_res$p.value,
+        n_ln_asympt = dim(df[df[g_col]==1,])[1],
+        n_ln_sympt = dim(df[df[g_col]==2,])[1],
+        n_ew_asympt = dim(df[df[g_col]==3,])[1],
+        n_ew_sympt = dim(df[df[g_col]==4,])[1],
+        median_ln_asympt = median(df[df[g_col]==1, p_col]),
+        median_ln_sympt = median(df[df[g_col]==2, p_col]),
+        median_ew_asympt = median(df[df[g_col]==3, p_col]),
+        median_ew_sympt = median(df[df[g_col]==4, p_col])
+      )
+    )
+  }
+  jt_protein <- function(p_col, g_col) {
+    df <- data_symp[complete.cases(data_symp[, p_col]),]
+    test_res <- jonckheere.test(
+      x=df[,p_col], g=as.numeric(df[,g_col]), nperm = 1000)
+    return(
+      list(
+        JT_statistic = test_res$statistic,
+        JT_p_value = test_res$p.value
+      )
+    )
+  }
+
+  # apply tests to each protein
+  results_list_kruskal <- lapply(common_uniprot, function (p_col) {
+    kw_protein(p_col, c)
+  })
+
+  results_list_jonkheere <- lapply(common_uniprot, function (p_col) {
+    jt_protein(p_col, c)
+  })
+
+  results_df_kruskal <- do.call(
+    rbind, lapply(results_list_kruskal, as.data.frame))
+  results_df_kruskal$KW_adj_pvalue <- p.adjust(
+    results_df_kruskal$KW_p_value, method = "BH")
+
+  results_df_jonkheere <- do.call(
+    rbind, lapply(results_list_jonkheere, as.data.frame))
+  results_df_jonkheere$JT_adj_pvalue <- p.adjust(
+    results_df_jonkheere$JT_p_value, method = "BH")
+
+  res_kw_jt <- cbind(results_df_kruskal, results_df_jonkheere)
+  res_kw_jt$Uniprot <- common_uniprot
+  res_kw_jt$Genes <- common_genenames
+
+  # collect results in list of dataframes
+  c_temp <- gsub("_severity", "", clinical_symptoms_bin[i])
+  df_res_list[[c_temp]] <- res_kw_jt
+
+}
+# Export
+write.xlsx(
+  df_res_list,
+  "../../../../results/loaloa/tables/sympt_stat_analysis_unadjForSexAndAge_05_newCat.xlsx")
 ```
