@@ -1,0 +1,3807 @@
+---
+title: "Analysis of the human host response to Mansonella infection"
+authors: "Clemens Dierks, Pinkus Tober-Lau"
+orcid: 0000-0002-4560-8939
+email: clemens.dierks@charite.de 
+date: last-modified 
+format: 
+    html:
+        code-fold: true
+        code-overflow: wrap
+        code-tools: true
+        graphics: yes
+        toc: true
+        toc-location: left-body
+        toc-title: "Outline"
+        html-math-method: katex
+
+bibliography: references.bib
+bibliographystyle: ieee
+---
+
+## Libraries
+
+```{python}
+# general imports
+import os, shutil
+import sys
+os.chdir(r"c:\\Users\\cleme\\OneDrive - Charité - Universitätsmedizin Berlin\\Projects\\02_NTD_CHARITE\\NTD")
+sys.path.append('src')
+sys.path.append('org')
+sys.path.append('src/py')
+import warnings
+warnings.filterwarnings('ignore')
+
+# data manipulation
+import pandas as pd
+import numpy as np
+from itertools import combinations, product
+
+# plotting
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import seaborn as sns
+from adjustText import adjust_text
+from matplotlib.colors import to_hex
+
+# ml & statistics
+import joblib 
+from statsmodels.stats.multitest import multipletests
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+
+from sklearn.feature_selection import mutual_info_classif, RFECV, SelectKBest, f_classif
+from sklearn.impute import KNNImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_curve, roc_auc_score, confusion_matrix, precision_score, recall_score, f1_score, auc
+from sklearn.model_selection import train_test_split, LeaveOneOut,StratifiedKFold, cross_validate, cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from scikit_posthocs import posthoc_dunn
+from scipy.stats import spearmanr, mannwhitneyu, kruskal,chi2_contingency, chisquare
+from sklearn.svm import SVC
+from sklearn.utils import resample
+
+from scipy.integrate import trapezoid
+from itables import show
+RANDOM_STATE = 42
+
+from PIL import Image
+
+```
+
+## Functions
+
+```{python}
+def plot_volcano_limma(
+    data_volcano, save_path=None, show_plot=True, 
+    add_info="", xlabel = "coef", fc=0.1):
+
+    # Plot Volcano plots based on limma outputs
+
+    # Select features based on significance and FC
+    regulated_features = data_volcano[
+        (data_volcano["adj.P.Val"]< 0.05) & 
+        ((data_volcano["logFC"] < -fc) | 
+        (data_volcano["logFC"] > fc))
+        ].index
+    
+    # Plotting
+    fig, ax = plt.subplots(1,1, figsize=(5,5))
+    ax.scatter(
+        x=data_volcano.loc[
+            (data_volcano[f"adj.P.Val"] >= 0.05), f"logFC"], 
+        y=-np.log10(
+            data_volcano.loc[
+                (data_volcano[f"adj.P.Val"] >= 0.05), 
+                f"adj.P.Val"]), c="k", alpha=0.5)
+    ax.scatter(
+        x=data_volcano.loc[regulated_features, f"logFC"], 
+        y=-np.log10(
+            data_volcano.loc[regulated_features, f"adj.P.Val"]), 
+            c="#FF3131", alpha=0.99, edgecolor="gray")
+
+    ax.set_xlabel(
+        "$\\bf{Log_{2} FC}$", fontdict={"size":14})
+    ax.set_ylabel(
+        "$\\bf{-log_{10} (p_{adj.})}$", 
+        fontdict={"size":14, "weight":"bold"})        
+
+    ax.axhline(1.3, c="gray", ls="--")
+    ax.axvline(fc, c="gray", ls="--")
+    ax.axvline(-fc, c="gray", ls="--")
+    ax.set_xlim([-0.5, 0.8])
+    # ax.set_xlim([-0.5, 1.3])
+    # ax.set_ylim([-0.5, 16])
+    ax.set_ylim([-0.5, 4])
+    ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold", fontsize=9)
+    ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", fontsize=9)
+    plt.grid()
+    plt.tight_layout()
+
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'{add_info}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    
+def select_topF_imp(model, th_expl_imp):
+    # Select features based on cumulative feature importanc
+    feat_imps = pd.Series(model.feature_importances_)
+    feat_imps = feat_imps[feat_imps > 0]
+    cum_sum = feat_imps.sort_values()[::-1].cumsum()
+    cum_sum = cum_sum[cum_sum < th_expl_imp]
+    feature_names = pd.Series(model.feature_names_in_)
+    return feature_names.loc[cum_sum.index]
+
+def select_topF_mutualinfo(X_train, y_train, th_exp_imp):
+    mic = pd.DataFrame(
+        {"MIC_abs":mutual_info_classif(
+            X_train, y_train, random_state=RANDOM_STATE)}, 
+        index=X_train.columns).sort_values(by="MIC_abs")[::-1]
+    mic["MIC_perc"] = mic["MIC_abs"]/mic["MIC_abs"].sum()
+    mic["MIC_cumsum"] = mic["MIC_perc"].cumsum()
+    mic = mic[mic["MIC_cumsum"] < th_exp_imp]
+    return mic.index
+def plot_fc_diff(limma_x,limma_y, xlabel, ylabel, save_path):
+    limma_x = limma_x.fillna("")
+    limma_y = limma_y.fillna("")
+
+    # check for common features
+    common_idx = list(set(limma_x.index) & set(limma_y.index))
+    limma_x = limma_x.loc[common_idx]
+    limma_y = limma_y.loc[common_idx]
+    fc_x = limma_x["logFC"]
+    fc_y = limma_y["logFC"]
+    p_x = -np.log10(limma_x["adj.P.Val"])
+    p_y = -np.log10(limma_y["adj.P.Val"])
+
+    diff = np.abs(p_x.copy().dropna().values,p_y.copy().values)
+    diff = (pd.Series(MinMaxScaler().fit_transform(diff.reshape(-1, 1)).ravel()))
+    s_rho, p = spearmanr(fc_x,fc_y)
+
+    # collect annotation 
+    texts = []
+
+    signif_both = 0
+    signif_MFEW = 0
+    signif_EW = 0
+
+    # return diff
+    fig, ax = plt.subplots(1,1, figsize=(8,8))
+    for i in range(len(fc_x)):
+        p_x = limma_x.loc[common_idx[i], "adj.P.Val"]
+        p_y = limma_y.loc[common_idx[i], "adj.P.Val"]
+        if limma_x.loc[common_idx[i], "genes"] != "nan":
+            label = limma_x.loc[common_idx[i], "genes"].split(" ")[0]
+            if label.startswith("IGL") | label.startswith("IGK") | label.startswith("IGHV") | label.startswith("IGHG4"):
+                label=""
+        else:
+            ""
+        if (p_x < 0.05) & (p_y >= 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:green", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label))
+            signif_EW +=1
+        elif (p_x >= 0.05) & (p_y < 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:blue", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k", )
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label))
+            signif_MFEW +=1
+        elif (p_x < 0.05) & (p_y < 0.05):
+            ax.scatter(
+                fc_x[i],fc_y[i], c="tab:red", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+            texts.append(plt.text(
+                    y = fc_y[i],
+                    x = fc_x[i],
+                    s= label, fontdict={"weight":"bold"}))
+            signif_both +=1
+        else:    
+            ax.scatter(
+                fc_x[i],fc_y[i], c="gray", 
+                alpha=0.5, s=(diff[i]+0.2)*180, ec="k")
+    adjust_text(texts,
+            # expand=(1.2, 2),
+            arrowprops=dict(arrowstyle='-', color='k'),
+            # only_move={'text':'y','text':'x'}
+            )
+
+    ax.scatter(
+        [], [], c="tab:blue", label="Signif. in MF + EWMF vs LN", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.scatter(
+        [], [], c="tab:green", label="Signif. in EW vs LN", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.scatter(
+        [], [], c="tab:red",  label="$\\bf{Signif. \ in \ both}$", 
+        s=100, alpha=.7, ec="k", lw=1)
+    ax.axhline(0, c="gray", ls="--")
+    ax.axvline(0, c="gray", ls="--")
+    ax.plot([-1.5,1.5], [-1.5,1.5], ls="--", c="k")
+    ax.set_xlim([-.4, 0.8])
+    ax.set_ylim([-.4, 0.8])
+    ax.set_xticklabels(ax.get_xticklabels(), fontdict={"weight":"bold"})
+    ax.set_yticklabels(ax.get_yticklabels(), fontdict={"weight":"bold"})
+    # Plot IGHG4 seperately to not skew the visualization
+    ax.text(0.51, 0.82, "IGHG4 [x: 1.05, y: 0.28]", c="tab:blue")
+    fig.supxlabel("logFC " + xlabel, fontweight="bold")
+    fig.supylabel("logFC " + ylabel, fontweight="bold")
+    ax.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f"{xlabel}_{ylabel}.png"), dpi=400)
+
+    print(signif_both, signif_MFEW, signif_EW)
+
+def plot_roc(
+    fpr_test_lst, tpr_test_lst, 
+    colors, contrasts, 
+    add_info, save_path, show_plot=False):
+    fig, ax = plt.subplots(1,1, figsize=(5,5))
+    for fpr_test, tpr_test, c, cs in zip(
+        fpr_test_lst, tpr_test_lst, colors, contrasts):
+        auroc_test = 1-trapezoid(fpr_test, tpr_test)
+        ax.plot(
+            fpr_test, tpr_test, c=c, alpha=1, lw=5, 
+            label=f"AUROC Val.: {auroc_test:.2f} ({cs})")
+    ax.plot([0,1], c="gray", ls="--")
+    ax.grid()
+    # Labels
+    ax.set_xlabel('FPR (1 - Specificity)', weight="bold", fontsize=14)
+    ax.set_ylabel('TPR (Sensitivity)', weight="bold", fontsize=14)
+    ax.set_xticklabels(ax.get_xticklabels(), weight="bold")
+    ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
+    plt.legend(ncols=1)
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f"ROC{add_info}"), dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
+
+            sympt_label = {
+                'unspecific': 'Unspecific',
+                'neurological': 'Neurological',
+                'urticaria': 'Urticaria',
+                'swelling_daily_life': 'Swelling',
+                'myalgia_daily_life': 'Myalgia',
+                'arthralgia_daily_life': 'Arthralgia',
+                'pruritus_daily_life': 'Pruritus'}
+
+            mapped_t = meta_table.loc[t, "Gene Names"].split(" ")[0]
+            if mapped_t == "":
+                mapped_t = t
+            levels = [
+                "LN asympt.", "LN sympt.",
+                "EW asympt." ,"EW sympt.",
+                "MF asympt.", "MF sympt."]
+            x_labels = [
+                "LN asympt.", "LN sympt.", 
+                "EW asympt." ,"EW sympt.",
+                "MF asympt.", "MF sympt."]
+            colors = [
+                (*colors_severity["LN"], 0.4),
+                colors_severity["LN"],
+                (*colors_severity["EW"], 0.4),
+                colors_severity["EW"],
+                (*colors_severity["MF"], 0.4),
+                colors_severity["MF"],
+                    ]
+                
+            df_plot = data[data[f"{c}_severity"].isin(levels)]
+            fig , ax = plt.subplots(1,1, figsize=(5,4))
+            sns.boxplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels,
+                fliersize=0, palette=colors, fill=False)
+            sns.stripplot(
+                data=df_plot, x=f"{c}_severity", y=t, order = levels, 
+                palette=colors, edgecolor="gray", linewidth=1, alpha=.2, s=4)
+            ax.axvline(3.5, c="gray", lw=1, ls="--")
+            ax.set_xticklabels(x_labels, fontdict={"weight":"bold"}, rotation=45)
+            ax.set_xlabel(sympt_label[c],  fontdict={"weight":"bold"})
+            ax.set_ylabel(
+                "$\\mathbf{log_2}$ " + f"{mapped_t} abundance", 
+                fontdict={"weight":"bold"})
+            if add_info=="_jt_05":
+                p = res_cont_dict[c].loc[
+                    res_cont_dict[c].index==t, "JT_adj_pvalue"].values[0]
+                ax.set_title(
+                    f"{mapped_t}\n" + "$p_{jt}$: "+f"${p:.2f}$",
+                            fontdict={"weight":"bold"})
+            else:
+                p = res_cont_dict[c].loc[
+                    res_cont_dict[c].index==t, "KW_adj_pvalue"].values[0]
+                ax.set_title(
+                    f"{mapped_t}\n" + "$p_{kw}$: "+f"${p:.2f}$",
+                            fontdict={"weight":"bold"})
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(save_path, f"{c}_{mapped_t}{add_info}.png"),
+                  dpi=300)
+            # plt.show()
+            plt.close()
+def plot_loaMF_prot(df, x, y, target, order, colors, save_path=None, show_plot=False):
+    # map uniprot -> gene symbol
+    mapped_y = meta_table[meta_table.index == y]["Gene Names"].values[0]
+        # remove NA's
+    common_ids = list(set(df[x].dropna().index) & set(df[y].dropna().index))
+    
+    df = df.copy()
+    df = df.loc[common_ids]
+
+    # fit linear model for 
+    m,b = np.polyfit(df.loc[:, x],df.loc[:, y],deg=1)
+    fig, ax = plt.subplots(1,1, figsize=(3.5,3.5))
+    ax.plot(df.loc[:, x], m*df.loc[:, x].values+b, lw=2, c="k", ls="--")
+    sns.scatterplot(
+        ax=ax, data=df, x=x, y=y, hue=target, alpha=0.8, 
+        edgecolor="k", linewidth=1., legend=False, palette=colors,
+        hue_order=order)
+    ax.grid(alpha=0.5) 
+    ax.set_ylabel("$\\bf{Log_2}$ Protein Abundance", fontdict={"weight":"bold"})
+    ax.set_xlabel("$\\bf{Log_2}$" +  f" Loa mf / mL Blood", fontdict={"weight":"bold"})
+    s_rho, p = spearmanr(df.loc[common_ids, x],df.loc[common_ids, y])
+    ax.text(x=1, y=np.max(df[y])-.06, s=f"$y = {m:.2f}*x+{b:.2f}$" + "\ns$_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.2f}")
+    ax.set_title(mapped_y.split(" ")[0] + "\n", fontweight="bold")
+    plt.tight_layout()
+    if save_path != None:
+        plt.savefig(os.path.join(save_path, f'{mapped_y}_{x}.png'),dpi=400)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+def optimize_clf_with_loocv(
+    X, y, clf, param_grid, random_state , scoring='roc_auc'):
+    """
+    Generic function to optimize any scikit-learn clf's hyperparameters using 
+    Leave-One-Out Cross Validation (LOOCV).
+    
+    Parameters:
+    - X: Feature matrix (numpy array or pandas DataFrame)
+    - y: Target vector (numpy array or pandas Series)
+    - clf: An instance of a scikit-learn classifier 
+    (e.g., RandomForestClassifier, LogisticRegression, SVM etc.)
+    - param_grid: A dictionary where keys are parameter names and values 
+    are lists/ranges of values to try
+    - random_state: Seed used for pseudo randomnes
+    - scoring: The metric used for optimization ('roc_auc' by default). 
+    an be any scikit-learn compatible metric.
+   
+
+    Returns:
+    - best_params: Dictionary of the best parameters found
+    - best_score: The best score (based on the specified scoring metric)
+    - scores: obtained scores
+    """
+    
+    # Initialize Leave-One-Out Cross-Validation
+    loo = LeaveOneOut()
+    best_score = -1  # Initialize best score
+    best_params = None
+    
+    # Create a list of all combinations of hyperparameters
+    param_names = list(param_grid.keys())
+    # Cartesian product of all parameter values
+    param_values = list(product(*param_grid.values()))
+    param_index = list(
+        product(*(range(len(values)) for values in param_grid.values())))
+
+    scores = []
+    # Iterate over all parameter combinations
+    for i, (idx, param_set) in enumerate(zip(param_index, param_values)):
+        param_dict = dict(zip(param_names, param_set))
+        clf.set_params(**param_dict)  # Set clf parameters
+        
+        # adapt random state
+        if "random_state" in clf.get_params():
+            clf.set_params(**{"random_state":random_state})
+
+        y_pred_prob = []
+        y_preds = []
+        y_true = []
+
+        # LOOCV: Iterate over each train-test split
+        for train_idx, test_idx in loo.split(X):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            y_true.append(y_test)
+            # Train the clf on the current training set
+            clf.fit(X_train, y_train)
+
+            # Get predicted probabilities for clfs that support it
+            try:
+                y_pred_prob.append(clf.predict_proba(X_test)[:, -1])
+            except AttributeError:
+                # Fallback if clf doesn't support `predict_proba`
+                y_pred_prob.append(clf.decision_function(X_test))
+        
+            y_preds.append(clf.predict(X_test))
+
+
+        # Calculate AUROC for this fold   
+        if scoring == 'roc_auc':
+            score = roc_auc_score(y_true, y_pred_prob)
+        # Use other scoring metrics (like accuracy, f1, etc.)
+        else:
+            if scoring == 'accuracy':
+                score = accuracy_score(y_true, y_preds)
+            else:
+                raise ValueError(
+                    f"Scoring method {scoring} is not supported yet.")
+        
+        # Update best parameters if current mean score is better
+        if score > best_score:
+            best_score = score
+            best_params = param_dict
+
+        # print(i, score, best_score, param_values[i])
+        scores.append(score)
+    print("Run Finished")
+    return best_params, best_score, scores, param_values
+
+
+def egfr_ckd_epi_2021_df(df, scr_col="scr", age_col="age", sex_col="sex_m", out_col="eGFR"):
+    df = df.copy()
+
+    sex = df[sex_col].astype(str)
+    female = sex.isin(["F"])
+    male = sex.isin(["M"])
+    if not (female | male).all():
+        bad = df.loc[~(female | male), sex_col].unique()
+        raise ValueError(f"Unrecognized sex values: {bad}")
+
+    kappa = np.where(female, 0.7, 0.9)
+    alpha = np.where(female, -0.241, -0.302)
+    sex_factor = np.where(female, 1.012, 1.0)
+
+    ratio = df[scr_col] / kappas
+
+    df[out_col] = (
+        142
+        * np.minimum(ratio, 1) ** alpha
+        * np.maximum(ratio, 1) ** -1.200
+        * (0.9938 ** df[age_col])
+        * sex_factor
+    )
+    return df
+
+```
+
+## Data Import
+
+We import two different datasets, an imputed one 
+were proteins with a missing value ratio of 
+>40% were removed and the remaining ones imported 
+with knn consisting of n=242 proteins and a non-imputed dataset containing 
+n=274 proteins.
+
+Furthermore, we exclude pregnant women (n=8) from the analysis and participants
+< 18 years, and selected only patients with loa monoinfection and healthy 
+controls.
+
+
+```{python}
+data = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+
+data_imp = pd.read_csv(
+	os.path.join("data", "preprocessed", 
+    "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_IMP_LOA_MV04.csv"),
+	index_col=0
+)
+
+# read technical meta table
+meta_table = pd.read_csv(
+    "results/loaloa/tables/technical_meta_table.csv", index_col=0)
+meta_table.loc["P06396-2", "Gene Names"] = "GSN-2"
+meta_table.loc["P04217-2", "Gene Names"] = "A1BG-2"
+meta_table.loc["A0A075B6Q5", "Gene Names"] = "IGHV3-64-2"
+meta_table.loc["P01042-2", "Gene Names"] = "KNG1-2"
+meta_table.loc["Q14624-2", "Gene Names"] = "ITIH4-2"
+meta_table.loc["P23142-4", "Gene Names"] = "FBLN1-4"
+meta_table["Gene Name"] = [f.split(" ")[0] for f in meta_table["Gene Names"]]
+
+
+data_imp["infection"] = data["infection"]
+
+
+# remove patients under 18 years old
+data = data[(data["age"]>= 18) | data["age"].isna()]
+data_imp = data_imp[(data_imp["age"]>= 18) | data_imp["age"].isna()]
+# define age groups
+
+data["age_imp"] = data["age"].fillna(200)
+data_imp["age_imp"] = data_imp["age"].fillna(200)
+data["age_group"] = pd.cut(
+    data["age_imp"], bins=[18, 34, 60, 200], labels=["<34", ">34 & <60", ">60"])
+data_imp["age_group"] = pd.cut(
+    data_imp["age_imp"], bins=[18, 34, 60, 200], labels=["<34", ">34 & <60", ">60"])
+
+# Rename Severity Level
+severity_level_dict = {
+    "eye worm+":"EW", 
+    "eye worm + microfilaria":"EWMF",      
+    "microfilaria+":"MF",
+    "hyper microfilaria":"MF",
+    "healthy":"LN",
+    "mansonella": "MP"
+    }
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+data_imp["disease severity"] = data_imp["disease severity"].replace(
+    severity_level_dict
+)
+
+# Rename controls to loa
+data["infection"] = data["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+data_imp["infection"] = data_imp["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+
+
+# add threshold for absolute eosionophil counts
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+# Load information about pregnancy and exclude pregnant women
+data_imp = data_imp.loc[data_imp["pregnancy"]!="pregnant"]
+data= data.loc[data["pregnancy"]!="pregnant"]
+
+# Select all co infections 
+data_mans = data.copy()
+
+# Exclude all co infections from the rest of the analysis
+# data = data[data["infection"].isin(["loa", "healthy controls"])]
+```
+
+```{python}
+data = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+
+severity_level_dict = {
+    "eye worm+":"EW", 
+    "eye worm + microfilaria":"EWMF",      
+    "microfilaria+":"MF",
+    "hyper microfilaria":"MF",
+    "healthy":"LN",
+    "mansonella": "MP"
+    }
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+data_imp["disease severity"] = data_imp["disease severity"].replace(
+    severity_level_dict
+)
+
+# Rename controls to loa
+data["infection"] = data["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+
+data["infection"] = data["infection"].replace({
+    "mansonella coinf": "CoMP",
+    "mansonella": "MP",
+    "malaria coinf": "CoMAL",
+    "mansonella & malaria coinf": "CoMPMAL"
+})
+
+data["severity"] = data["disease severity"] + "_" + data["infection"]
+
+data["severity"] = data["severity"].replace({
+    'EW_INF':"LLew", 
+    'EWMF_INF': "LLewmf", 
+    'LN_LN':"CTRL",
+    'MP_MP':"MP", 
+    'MF_INF':"LL",
+    'EW_CoMP': "LLew_MP",
+    'MF_CoMP': "LL_M",
+    'EWMF_CoMP': "LLewmf_MP",
+})
+
+data = data[~data["severity"].isin(["LLew", "LLew_MP", "LLewmf_MP", "LLewmf", "LLewmf_MP", "EW_CoMAL", "EW_CoMPMAL", "EWMF_CoMAL", "EWMF_CoMPMAL"])]
+
+
+```
+
+```{python}
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+data= data.loc[data["pregnancy"]!="pregnant"]
+
+```
+
+```{python}
+data = data[(data["age"]>= 18) | data["age"].isna()]
+data["disease severity"].value_counts()
+
+data = data.drop(
+    data[(data["eos_high"] == "1") & (data["disease severity"] == "LN")].index)
+data["disease severity"].value_counts()
+```
+
+```{python}
+
+
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+
+
+
+
+data.shape
+```
+
+# Mansonella analysis
+
+```{python}
+pcr_results_luzia = pd.read_excel(
+    os.path.join("data", "meta_clinical", "MansonellenPCRfürClemens.xlsx")
+, index_col=0)
+
+pcr_results_luzia.index = ["BDLL-P" + str(i)[-4:] for i in pcr_results_luzia.index]
+
+pcr_results_luzia = pcr_results_luzia[pcr_results_luzia["Mansonella FRET Assay"]!="Unknown"]
+
+pcr_results_luzia["Mansonella FRET Assay"] = pcr_results_luzia["Mansonella FRET Assay"].replace({
+    "Perstans":"perstans",
+    "sp.Deux" : "DEUX",
+    "sp.Deux+perstans": "DEUX+perstans",
+    "Deux+perstans": "DEUX+perstans",
+    "Deux+Perstans": "DEUX+perstans",
+    "45 piek": "Negative"
+})
+```
+
+```{python}
+data_mans.rename(dict(zip(meta_table.index, [x.split(" ")[0] for x in meta_table["Gene Names"]])), axis=1)
+
+data_mans = data_mans.merge(pcr_results_luzia[["Mansonella FRET Assay"]], left_on="Sample ID", right_index=True, how="left")
+
+data_mans = data_mans.drop(
+    data_mans[(data_mans["eos_high"] == "1") & (data_mans["disease severity"] == "LN")].index)
+
+proteins = [x.split(" ")[0] for x in meta_table["Gene Names"]]
+
+data_mans["infection"] = data_mans["infection"].replace({
+    "mansonella coinf": "CoMP",
+    "mansonella": "M",
+    "malaria coinf": "CoMAL",
+    "mansonella & malaria coinf": "CoMPMAL"
+})
+
+data_mans["severity"] = data_mans["disease severity"] + "_" + data_mans["infection"]
+
+data_mans["severity"] = data_mans["severity"].replace({
+    'EW_INF':"LLew", 
+    'EWMF_INF': "LLewmf", 
+    'LN_LN':"CTRL",
+    'MP_M':"M", 
+    'MF_INF':"LL",
+    'EW_CoMP': "LLew_MP",
+    'MF_CoMP': "LL_M",
+    'EWMF_CoMP': "LLewmf_MP",
+})
+
+
+groups_severity_mans = [
+ 'CTRL', 'M', 'LL', 'LLewmf', 'LLew',
+ ]
+groups_severity_mans_coinf = [
+ 'CTRL', 'M', 'LL', 'LLewmf', 'LLew',
+ 'EWMF_CoMAL', 'EWMF_CoMP', 'EWMF_CoMPMAL',
+ 'EW_CoMAL', 'EW_CoMP', 'EW_CoMPMAL',
+  'MF_CoMAL', 'MF_CoMP', 'MF_CoMPMAL']
+
+groups_sel = ['CTRL', 'M', 'LL', "LL_M"]
+
+data_mans.to_csv(
+    os.path.join("results", "mansonella", "20260225_data_mp.csv")
+    )
+
+df = data_mans[data_mans["severity"].isin(groups_sel)]
+
+```
+
+
+## Cohort Statistics
+
+per Group
+N, Sex (%w), Median Age, median mans para, median ll_para 
+
+per Protein
+Study CV
+Pool CV
+Protein Name
+r Mans Para
+r Loa Para
+
+N_Group
+MV_Group
+Median Abund_Group
+
+Contrasts (Mann-Whitney U):
+Mans HC
+Mans vs Loa all
+Mans vs Loa MF + EWMF
+Mans vs Loa EW
+Mans vs Mans + Loa MF  
+Mans vs Mans + Loa EW
+
+Groups:
+
+```{python} 
+res_path_mans = "results/mansonella"
+
+df = data_mans[data_mans["severity"].isin(groups_sel)]
+groups = groups_sel
+alpha = 0.05
+
+fbc = df.columns[41:53]
+
+###
+
+n_groups = df["severity"].value_counts().loc[groups]
+n_groups.columns = ["N_group"]
+
+## Study Demographics
+median_age =df.groupby("severity")["age"].median()
+q25_age =df.groupby("severity")["age"].quantile(0.25)
+q75_age =df.groupby("severity")["age"].quantile(0.75)
+
+perc_sex_f = df.groupby("severity").apply(
+    lambda g: (g['sex'] == 0).mean() * 100)
+
+
+median_ll_mf = df[df["ll_mf"].notna()].groupby("severity")["ll_mf"].median()
+q25_ll_mf  =df.groupby("severity")["ll_mf"].quantile(0.25)
+q75_ll_mf  =df.groupby("severity")["ll_mf"].quantile(0.75)
+
+median_ll_mf_f = df[df["ll_mf"].notna()][
+    df["sex"]==0].groupby("severity")["ll_mf"].median()
+median_ll_mf_m = df[df["ll_mf"].notna()][
+    df["sex"]==1].groupby("severity")["ll_mf"].median()
+
+median_mp_mf = df[df["mp_mf"].notna()].groupby("severity")["mp_mf"].median()
+q25_mp_mf  =df.groupby("severity")["mp_mf"].quantile(0.25)
+q75_mp_mf  =df.groupby("severity")["mp_mf"].quantile(0.75)
+median_mp_mf_f = df[df["mp_mf"].notna()][
+    df["sex"]==0].groupby("severity")["mp_mf"].median()
+median_mp_mf_m = df[df["mp_mf"].notna()][
+    df["sex"]==1].groupby("severity")["mp_mf"].median()
+
+_, p_age = kruskal(*[
+    df[df["severity"]==g]["age"].dropna().values for g in groups
+])
+
+median_fbc = df.groupby("severity")[fbc].median()
+q25_fbc = df.groupby("severity")[fbc].quantile(0.25)
+q75_fbc = df.groupby("severity")[fbc].quantile(0.75)
+
+median_fbc.columns = [f"{fbc}_median" for fbc in fbc]
+q25_fbc.columns = [f"{fbc}_q25" for fbc in fbc]
+q75_fbc.columns = [f"{fbc}_q75" for fbc in fbc]
+
+overview_df = pd.concat([
+    n_groups, 
+    q25_age, median_age, q75_age, 
+    perc_sex_f,
+    median_ll_mf, q25_ll_mf, q75_ll_mf, median_ll_mf_f, median_ll_mf_m, 
+    median_mp_mf, q25_mp_mf, q75_mp_mf, median_mp_mf_f, median_mp_mf_m,], axis=1)
+
+overview_df.columns = [
+    "N_groups", "age_q25", "age_median", "age_75",
+    "percSexF",
+    "llmf_median", "llmf_q25", "llmf_q75", "llmf_median_sexF", "llmf_median_sexM",
+    "mpmf_median", "mpmf_q25", "mpmf_q75", "mpmf_median_sexF", "mpmf_median_sexM",
+]
+
+overview_df = pd.concat([
+    overview_df, median_fbc, q25_fbc, q75_fbc], axis=1)
+
+overview_df.fillna(0, inplace=True)
+overview_df = overview_df.T
+
+overview_df.to_excel(
+    os.path.join(res_path_mans, "cohort_overview.xlsx")
+)
+```
+
+```{python}
+## Statistics
+comb = list(combinations(groups, 2))
+
+contingency_table_sex = pd.crosstab(df['sex'], df['severity'])
+chi2, p_chi_sex, dof, expected = chi2_contingency(contingency_table_sex)
+
+if p_chi_sex < alpha: 
+    p_chi_sex_group = [chi2_contingency(pd.crosstab(
+        df[df["severity"].isin(pair)]["sex"],
+        df[df["severity"].isin(pair)]["severity"]))[1] for pair in list(combinations(groups, 2))]
+p_chi_sex_group = pd.Series(p_chi_sex_group)
+p_chi_sex_group.index = [f"p_{'vs'.join(g)}" for g in combinations(groups, 2)]
+q_chi_sex_group = pd.Series(
+    multipletests(p_chi_sex_group)[1], 
+    ["_".join(x) for x in combinations(groups, 2)])
+q_chi_sex_group.index = [f"qfdr_{'vs'.join(g)}" for g in combinations(groups, 2)]
+
+p_kruskal_age = kruskal(*[df[df["severity"]==g]["age"] for g in groups_sel], nan_policy="omit").pvalue
+
+p_u_mpmf = mannwhitneyu(
+    df[(df["severity"]=="LL_M")]["mp_mf"], 
+    df[(df["severity"]=="M")]["mp_mf"])[1]
+
+p_u_llmf = mannwhitneyu(
+    df[(df["severity"]=="LL_M")]["ll_mf"], 
+    df[(df["severity"]=="LL")]["ll_mf"])[1]
+
+# was added manually to supplementary table
+p_srho_age_mpmf, r_srho_age_mpmf = spearmanr(
+    df[(df["severity"]=="M")]["mp_mf"], 
+    df[(df["severity"]=="M")]["age"], nan_policy="omit")
+
+p_kruskal_fbc = [kruskal(*[df[df["severity"]==g][f] for g in groups_sel], nan_policy="omit").pvalue for f in fbc]
+p_kruskal_fbc = pd.Series(p_kruskal_fbc, index=[f"p_kruskal_{f}" for f in fbc])
+p_dunn_fbc = [posthoc_dunn([df[df["severity"]==g][f].dropna() for g in groups_sel]) for f in fbc]
+q_dunn_fbc = [posthoc_dunn([df[df["severity"]==g][f].dropna() for g in groups_sel], p_adjust="fdr_bh") for f in fbc]
+
+p_dunn_fbc = [pd.DataFrame(p.values, index=groups_sel, columns=groups_sel) for p in p_dunn_fbc]
+q_dunn_fbc = [pd.DataFrame(p.values, index=groups_sel, columns=groups_sel) for p in q_dunn_fbc]
+
+res_p_dunn_fbc = [pd.DataFrame(p.values, index=groups_sel, columns=groups_sel).reset_index().melt(id_vars='index', var_name='colname', value_name='value') for p in p_dunn_fbc]
+res_q_dunn_fbc = [pd.DataFrame(q.values, index=groups_sel, columns=groups_sel).reset_index().melt(id_vars='index', var_name='colname', value_name='value') for q in q_dunn_fbc]
+
+res_p_dunn_fbc_lst = []
+for df_p in res_p_dunn_fbc:
+    df_p["pair"] = df_p.apply(lambda row: tuple(sorted([row['index'], row['colname']])), axis=1)
+    df_p = df_p[df_p["index"]!=df_p["colname"]]
+    df_p = df_p.drop_duplicates(subset="pair")
+    df_p.index = "p_" + df_p["colname"]+ "vs" + df_p["index"]
+    df_p = df_p.drop(["index", "colname", "pair"], axis=1)
+    res_p_dunn_fbc_lst.append(df_p)
+
+res_q_dunn_fbc_lst = []
+for df_q in res_q_dunn_fbc:
+    df_q["pair"] = df_q.apply(lambda row: tuple(sorted([row['index'], row['colname']])), axis=1)
+    df_q = df_q[df_q["index"]!=df_q["colname"]]
+    df_q = df_q.drop_duplicates(subset="pair")
+    df_q.index = "qfdr_" + df_q["colname"]+ "vs" + df_q["index"]
+    df_q = df_q.drop(["index", "colname", "pair"], axis=1)
+    res_q_dunn_fbc_lst.append(df_q)
+
+res_p_dunn_fbc = pd.concat([p.T for p in res_p_dunn_fbc_lst])
+res_p_dunn_fbc.index = fbc
+res_q_dunn_fbc = pd.concat([q.T for q in res_q_dunn_fbc_lst])
+res_q_dunn_fbc .index = fbc
+
+res_p_dunn_fbc.loc[[p >= 0.05 for p in p_kruskal_fbc]] = np.nan
+res_q_dunn_fbc.loc[[p >= 0.05 for p in p_kruskal_fbc]] = np.nan
+res_q_dunn_fbc
+
+
+global_stats = pd.Series()
+global_stats["p_kruskal_age"] = p_kruskal_age
+global_stats["p_chi_sex"] = p_chi_sex
+global_stats["p_u_Mmf"] = p_u_mpmf
+global_stats["p_u_LLmf"] = p_u_llmf
+
+global_stats = pd.concat([
+    global_stats, p_kruskal_fbc
+])
+
+global_stats
+
+p_chi_sex_group.name = "sex"
+
+posthoc_stats = pd.DataFrame()
+posthoc_stats = pd.concat([
+    res_p_dunn_fbc, 
+    res_q_dunn_fbc], axis=1)
+posthoc_stats.loc["sex", :] = pd.concat([p_chi_sex_group, q_chi_sex_group])
+
+writer = pd.ExcelWriter(os.path.join(
+    res_path_mans, "stats_overview.xlsx"
+))
+
+with writer:
+    global_stats.to_excel(
+        writer, sheet_name="global_analysis", index=True)
+    posthoc_stats.to_excel(
+        writer, sheet_name="posthoc_analysis", index=True)
+```
+
+## Differential Abundance Analysis
+
+```{python}
+# Sample Sizes
+n_per_group = pd.DataFrame(
+    df.groupby("severity")[meta_table.index].count().T[groups])
+n_per_group.columns = ["N_"+g for g in groups]
+
+# Correlation with parasite count (MP and LL)
+df_ll = df[df["ll_mf"]>0]
+df_mp = df[df["mp_mf"]>0]
+
+r_df = pd.concat([        
+    pd.concat(
+        [pd.Series(
+            [spearmanr(
+                df_mp[df_mp["severity"]==g][p], 
+                df_mp[df_mp["severity"]==g]["mp_mf"], nan_policy="omit")[0] for p in meta_table.index], 
+                name=f"r_srho_Mmf_{g}",
+                index=meta_table.index) for g in ["M", "LL_M"]], axis=1),
+    pd.concat(
+        [pd.Series(
+            [spearmanr(
+                df_mp[df_mp["severity"]==g][p], 
+                df_mp[df_mp["severity"]==g]["mp_mf"], nan_policy="omit")[1] for p in meta_table.index], 
+                name=f"p_srho_Mmf_{g}",
+                index=meta_table.index) for g in ["M", "LL_M"]], axis=1),
+    pd.concat(
+        [pd.Series(
+            [spearmanr(
+                df_ll[df_ll["severity"]==g][p], 
+                df_ll[df_ll["severity"]==g]["ll_mf"], nan_policy="omit")[0] for p in meta_table.index], 
+                name=f"r_srho_LLmf_{g}",
+                index=meta_table.index) for g in ["LL", "LL_M"]], axis=1),
+    pd.concat(
+        [pd.Series(
+            [spearmanr(
+                df_ll[df_ll["severity"]==g][p], 
+                df_ll[df_ll["severity"]==g]["ll_mf"], nan_policy="omit")[1] for p in meta_table.index], 
+                name=f"p_srho_LLmf_{g}",
+                index=meta_table.index) for g in ["LL", "LL_M"]], axis=1)],
+    axis=1)
+# Multiple Testing correction
+r_df = pd.concat([
+    r_df,
+    pd.DataFrame(
+        [multipletests(r_df[c], method="fdr_bh")[1] for c in r_df.columns if c.startswith("p_")], columns=meta_table.index, index=[c.replace("p_", "qfdr_") for c in r_df.columns if c.startswith("p_")]).T
+], axis=1)
+```
+
+Statistical Testing for Severity differences
+- Mann-Whitney U - tests for MP vs CTRL
+- Kruskal-Wallis H -Test for differences in infected groups [MP, LLmf, llmf_MP]
+- Post-Hoc Tests for statistical different group in omnibus test
+
+```{python}
+groups_median_abund = pd.concat([df.loc[df["severity"]==g, meta_table.index].median() for g in groups], axis=1)
+groups_median_abund.columns = [f"MedAbund_{g}" for g in groups]
+
+contrasts = [
+    ('M', 'CTRL'),
+    ('M', 'LL'),
+    ('M', 'LL_M'),
+    ('LL_M', 'LL')]
+
+contrasts_median_fc = pd.DataFrame([[
+    df.loc[df["severity"]==pair[0], p].median() - df.loc[df["severity"]==pair[1], p].median()
+     for pair in contrasts] for p in meta_table.index],
+    index=meta_table.index,
+    columns = ["MedFC_" +"vs".join(pair) for pair in contrasts])
+
+
+```
+
+```{python}
+groups_severity_kruskal= ['M', 'LL', 'LL_M']
+
+# Severity Differences
+p_u_mpvsCTRL = pd.Series(
+    [mannwhitneyu(df[df["severity"]=="M"][p], df[df["severity"]=="CTRL"][p], nan_policy="omit").pvalue for p in meta_table.index], index=meta_table.index, name="p_u_MvsCTRL")
+q_u_mpvsCTRL = pd.Series(
+    multipletests(p_u_mpvsCTRL, method="fdr_bh")[1], index=meta_table.index, name="qfdr_u_MvsCTRL")
+
+p_kruskal_severity = pd.Series(
+    [kruskal(*[df[df["severity"]==g][p].dropna() for g in groups_severity_kruskal]).pvalue for p in meta_table.index], index=meta_table.index, name="p_kruskal_severity")
+
+q_kruskal_severity = pd.Series(multipletests(p_kruskal_severity, method="fdr_bh")[1], index=meta_table.index, name="qfdr_kruskal_severity")
+
+
+p_kruskal_signif = p_kruskal_severity[p_kruskal_severity<0.05].index
+
+## Post-Hoc tests
+res_p_dunn_severity =  [posthoc_dunn([df[df["severity"]==g][p].dropna() for g in groups_severity_kruskal])  for p in p_kruskal_signif]
+
+res_q_dunn_severity = [posthoc_dunn([df[df["severity"]==g][p].dropna() for g in groups_severity_kruskal], p_adjust="fdr_bh")  for p in p_kruskal_signif]
+
+res_p_dunn_severity = [
+    pd.DataFrame(p.values, index=groups_severity_kruskal, columns=groups_severity_kruskal).reset_index().melt(id_vars='index', var_name='colname', value_name='value') for p in res_p_dunn_severity]
+res_q_dunn_severity = [
+    pd.DataFrame(q.values, index=groups_severity_kruskal, columns=groups_severity_kruskal).reset_index().melt(id_vars='index', var_name='colname', value_name='value') for q in res_q_dunn_severity]
+
+
+res_p_dunn_severity_lst = []
+for df_p in res_p_dunn_severity:
+    df_p["pair"] = df_p.apply(lambda row: tuple(sorted([row['index'], row['colname']])), axis=1)
+    df_p = df_p[df_p["index"]!=df_p["colname"]]
+    df_p = df_p.drop_duplicates(subset="pair")
+    df_p.index = "p_dunn_" + df_p["colname"]+ "vs" + df_p["index"]
+    df_p = df_p.drop(["index", "colname", "pair"], axis=1)
+    res_p_dunn_severity_lst.append(df_p)
+
+res_q_dunn_severity_lst = []
+for df_q in res_q_dunn_severity:
+    df_q["pair"] = df_q.apply(lambda row: tuple(sorted([row['index'], row['colname']])), axis=1)
+    df_q = df_q[df_q["index"]!=df_q["colname"]]
+    df_q = df_q.drop_duplicates(subset="pair")
+    df_q.index = "qfdr_dunn_" + df_q["colname"]+ "vs" + df_q["index"]
+    df_q = df_q.drop(["index", "colname", "pair"], axis=1)
+    res_q_dunn_severity_lst.append(df_q)
+
+res_p_dunn_severity = pd.concat([p.T for p in res_p_dunn_severity_lst])
+res_p_dunn_severity.index = p_kruskal_signif
+res_q_dunn_severity = pd.concat([q.T for q in res_q_dunn_severity_lst])
+res_q_dunn_severity.index = p_kruskal_signif
+
+results_severity = pd.concat([
+    n_per_group, r_df, groups_median_abund, contrasts_median_fc, 
+    p_u_mpvsCTRL, q_u_mpvsCTRL, 
+    p_kruskal_severity, q_kruskal_severity, 
+    res_p_dunn_severity, res_q_dunn_severity], axis=1)
+
+
+results_severity["diff_abund_MvsCTRL"] =False
+results_severity["diff_abund_severity"] =False
+results_severity["diff_abund_MvsLL"] =False
+results_severity["diff_abund_MvsLL_M"] =False
+results_severity["diff_abund_LL_MvsLL"] =False
+
+
+
+results_severity.loc[
+        (results_severity["MedFC_MvsCTRL"].abs() > 0.2) &
+        (results_severity["qfdr_u_MvsCTRL"]<0.01),
+        f"diff_abund_MvsCTRL"
+    ] = True
+results_severity.loc[
+        (results_severity["MedFC_MvsLL"].abs() > 0.2) & 
+        (results_severity["p_kruskal_severity"]<0.05),
+        f"diff_abund_severity"
+    ] = True
+results_severity.loc[
+        (results_severity["MedFC_MvsLL"].abs() > 0.2) & 
+        (results_severity["p_dunn_MvsLL"]<0.05),
+        f"diff_abund_MPvsLLmf"
+    ] = True
+results_severity.loc[
+        (results_severity["MedFC_MvsLL_M"].abs() > 0.2) & 
+        (results_severity["p_dunn_MvsLL_M"]<0.05),
+        f"diff_abund_MvsLL_M"
+    ] = True
+results_severity.loc[
+        (results_severity["MedFC_LL_MvsLL"].abs() > 0.2) & 
+        (results_severity["p_dunn_LLvsLL_M"]<0.05),
+        f"diff_abund_LL_MvsLL"
+    ] = True
+
+
+meta_table_sel = meta_table[["Gene Name", "Protein names", "CV_study", "CV_plasma"]]
+meta_table_sel.columns = ["Gene Name", "Protein names", "CV Study", "CV QC"]
+
+results_severity = meta_table_sel.merge(results_severity, left_index=True, right_index=True)
+
+
+# Correlation Proteins with age in CTRL and MP
+r_srho_ctrl_age = [spearmanr(df[df["severity"]=="CTRL"]["age"], df[df["severity"]=="CTRL"][p], nan_policy="omit")[0] for p in meta_table.index]  
+r_srho_mp_age = [spearmanr(df[df["severity"]=="M"]["age"], df[df["severity"]=="M"][p], nan_policy="omit")[0] for p in meta_table.index] 
+p_srho_ctrl_age = [spearmanr(df[df["severity"]=="CTRL"]["age"], df[df["severity"]=="CTRL"][p], nan_policy="omit")[1] for p in meta_table.index]
+p_srho_mp_age = [spearmanr(df[df["severity"]=="M"]["age"], df[df["severity"]=="M"][p], nan_policy="omit")[1] for p in meta_table.index]
+q_srho_ctrl_age = multipletests(p_srho_mp_age, method="fdr_bh")[1]
+q_srho_mp_age = multipletests(p_srho_mp_age, method="fdr_bh")[1]
+
+
+s_rho_age_df = pd.DataFrame({
+    "r_srho_CTRL_age":r_srho_ctrl_age, 
+    "r_srho_M_age":r_srho_mp_age,
+    "p_srho_CTRL_age":p_srho_ctrl_age, 
+    "p_srho_M_age":p_srho_mp_age, 
+    "q_srho_CTRL_age":q_srho_ctrl_age, 
+    "q_srho_M_age":q_srho_mp_age
+    }, index=meta_table.index) 
+
+results_severity = pd.concat(
+    [results_severity, s_rho_age_df], axis=1
+)
+results_severity.to_csv(
+    os.path.join(res_path_mans, "diff_abund_analysis_mp.csv"), index=True
+)
+```
+
+
+## Machine Learning
+### Classification Mansonella vs Ctrl
+```{python}
+# # ---------------------
+# # 1. Load and filter data
+# # ---------------------
+
+# random_state=20250811
+# df = data_mans[data_mans["severity"].isin(groups_sel)]
+
+
+# # only features with 100% completeness considered
+# missingness = df[meta_table.index].isna().mean()
+# low_missing_proteins = missingness[missingness <= 0.2].index
+# features_ml = list(set(low_missing_proteins) & set(meta_table.index))
+
+# # Filter only relevant classes
+# df_filtered = df[df['severity'].isin(['M', 'CTRL'])].copy().dropna(subset="age") 
+
+# df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==0)].sample(27, random_state=42).index, inplace=True)
+# df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==1)].sample(17, random_state=42).index, inplace=True)
+
+# df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
+
+# df_filtered_prot = pd.DataFrame(
+#     KNNImputer().fit_transform(df_filtered[features_ml]),
+#     index=df_filtered.index,
+#     columns=features_ml,
+#     )
+# df_filtered = pd.concat(
+#     [df_filtered[["age", "sex", "severity",]], # "severity_combined"
+#     df_filtered_prot], axis=1)
+
+# # ---------------------
+# # 2. Define Test Set
+# # ---------------------
+
+# test_df = (
+#     df_filtered.groupby('severity', group_keys=False)
+#     .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
+# )
+
+# # Remaining data is training set
+# train_df = df_filtered.drop(index=test_df.index)
+
+# # ---------------------
+# # 3. Balance sample sizes in training data
+# # ---------------------
+# min_count = train_df['severity'].value_counts().min()
+# balanced_train_df = (
+#     train_df.groupby('severity', group_keys=False)
+#     .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
+# )
+
+# res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
+# for p in features_ml:
+#     res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="M", p].median() - train_df.loc[train_df["severity"]=="LL", p].median()
+#     res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
+# res_roc.sort_index(inplace=True)
+# res_roc.sort_values("AUROC")
+
+# feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
+
+
+# print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
+
+# # ---------------------
+# # 4. Define feature sets
+# # ---------------------
+# meta_cols = ['severity', 'sex']
+# protein_cols = feat_high_roc
+
+# y = balanced_train_df['severity']
+
+# X_sets = {
+#     "Proteins only": balanced_train_df[protein_cols],
+#     # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+#     # "Age": balanced_train_df[["age"]],
+#     # "Sex": balanced_train_df[["sex"]],
+#     # "Proteins + FBC": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+#     # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
+#     # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
+#     # "Proteins + FBC + Sex": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
+#     # "Proteins + FBC + Age": balanced_train_df[
+#         # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
+    
+#     # "Proteins + FBC + Sex + Age": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
+#     # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
+#     # "Sex + Age": balanced_train_df[["sex", "age"]],
+# }
+
+# # ---------------------
+# # 5. Define models
+# # ---------------------
+# scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
+
+# cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
+# n_trees = 20
+# max_depth = 2
+
+# models = {
+#     # "LogisticRegression": LogisticRegression(
+#         # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
+#     "RandomForest": RandomForestClassifier(
+#         random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
+#     # "GradientBoosting": GradientBoostingClassifier(
+#     #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
+#     # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
+# }
+
+# # Define different numbers of features to test
+# feature_counts = list(range(1, 35))
+
+
+# # Store learning curve results here
+# learning_curve_results = []
+
+# for set_name, X in X_sets.items():
+#     for model_name, model in models.items():
+#         for k in feature_counts:
+            
+#             # Make sure k doesn't exceed number of features
+#             k_adjusted = min(k, X.shape[1])
+
+#             # Create pipeline with feature selection + classifier
+#             pipe = Pipeline([
+#                 ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
+#                 ('clf', clone(model))
+#             ])
+
+#             # Initialize variables
+#             best_params = {}
+#             scores = {}
+
+#             y_prob = cross_val_predict(
+#                 pipe,
+#                 X,
+#                 y.loc[X.index],
+#                 cv=cv,
+#                 method="predict_proba"
+#             )[:, 1]
+
+#             scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
+
+#             avg_roc_auc = scores['test_roc_auc'].mean()
+#             avg_accuracy = scores["test_accuracy"].mean()
+
+#             learning_curve_results.append({
+#                 'Feature_Set': set_name,
+#                 'Model': model_name,
+#                 'Num_Features': k_adjusted,
+#                 'Mean_Accuracy': avg_accuracy,
+#                 'Mean_AUROC': avg_roc_auc,
+
+#                 # 'features': 
+#             })
+        
+
+#             if model_name=="RandomForest":
+#                 if k==50:
+#                     break
+
+# lc_df = pd.DataFrame(learning_curve_results)
+# lc_df.to_csv(
+#     os.path.join(
+#         "results", "mansonella", "ml", "results_learning_curve_MPvsCTRL.csv"
+#     )
+# )
+# # Plot learning curves
+# plt.figure(figsize=(12, 8))
+
+# for (set_name, model_name), group_df in lc_df.groupby(
+#     ['Feature_Set', 'Model']):
+#     plt.plot(
+#         group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
+
+# plt.xlabel("Number of Features Selected")
+# plt.ylabel("Mean Accuracy (cross-validated)")
+# plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
+# plt.legend(loc='lower right')
+# plt.grid(True)
+# plt.tight_layout()
+# plt.savefig(
+#     os.path.join(
+#         "results", "mansonella", "ml", "learning_curve_cv_accuracy_MPvsCTRL.png"
+#     )
+# )
+# plt.show()
+
+```
+
+```{python}
+
+# best_feature_set = "Proteins only"
+# best_model_name = "RandomForest"
+
+# print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
+
+# # Get the model object
+# best_model = models[best_model_name]
+
+# # Prepare training data
+# X_train_final = X_sets[best_feature_set]
+# y_train_final = y.loc[X_sets[best_feature_set].index]
+
+# # X_train_final =pipe_final train_df[selected_features]
+
+# # Prepare test data
+# test_features = test_df[list(X_train_final.columns)]
+# y_test = test_df['severity']
+
+# # Build and train pipeline
+
+# pipe_final_MPvsCTRL = Pipeline([
+#     ('pipe_final', SelectKBest(score_func=f_classif, k=14)),
+#     ('clf', best_model)
+# ])
+
+# pipe_final_MPvsCTRL.fit(X_train_final, y_train_final)
+
+# # Predict on train set
+# y_pred_test = pipe_final_MPvsCTRL.predict(test_features)
+# y_prob_test = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]  
+# # Predict on test set
+# y_pred_train = pipe_final_MPvsCTRL.predict(X_train_final)
+# y_prob_train = pipe_final_MPvsCTRL.predict_proba(X_train_final)[:, 1] 
+
+
+# # Evaluation metrics
+# test_metrics = pd.Series({
+#     'accuracy': accuracy_score(y_test, y_pred_test),
+#     'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
+#     'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
+#     'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
+#     'auroc': roc_auc_score(y_test, y_prob_test) 
+# })
+
+# train_metrics = pd.Series({
+#     'accuracy': accuracy_score(y_train_final, y_pred_train),
+#     'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
+#     'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
+#     'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
+#     'auroc': roc_auc_score(y_train_final, y_prob_train)
+# })
+
+# ml_results_MPvsCTRL = pd.concat([
+#     train_metrics, test_metrics
+# ], axis=1)
+# ml_results_MPvsCTRL.columns = ["Training_MPvsCTRL", "Test_MPvsCTRL"]
+
+
+# # Collect data for CM and ROC Curves
+
+# # Re-map labels to binary for ROC
+# label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
+# y_train_bin = y_train_final.map(label_mapping).values
+# y_test_bin = y_test.map(label_mapping).values
+
+# # 1. ROC Curve on Training Set (CV predictions)
+# y_train_proba_cv = cross_val_predict(
+#     pipe_final_MPvsCTRL, X_train_final, y_train_final,
+#     cv=cv, method='predict_proba'
+# )[:, 1]
+
+# fpr_train_MPvsCTRL, tpr_train_MPvsCTRL, _ = roc_curve(y_train_bin, y_train_proba_cv)
+# roc_auc_train_MPvsCTRL = auc(fpr_train_MPvsCTRL, tpr_train_MPvsCTRL)
+
+# # 2. ROC Curve on Test Set
+# y_test_proba = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]
+# fpr_test_MPvsCTRL, tpr_test_MPvsCTRL, _ = roc_curve(y_test_bin, y_test_proba)
+# roc_auc_test_MPvsCTRL = auc(fpr_test_MPvsCTRL, tpr_test_MPvsCTRL)
+
+
+# # Test set predictions at threshold 0.5
+# y_test_pred = (y_test_proba >= 0.5).astype(int)
+# cm_test_MPvsCTRL = pd.DataFrame(
+#     confusion_matrix(y_test_bin, y_test_pred), 
+#     index=["MP", "CTRL"], columns=["MP", "CTRL"])
+
+# y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
+# cm_train_MPvsCTRL = pd.DataFrame(
+#     confusion_matrix(y_train_bin, y_train_pred_cv),
+#     index=["MP", "CTRL"], columns=["MP", "CTRL"])
+```
+
+```{python}
+# selected_features = X_train_final.columns[pipe_final_MPvsCTRL.named_steps['pipe_final'].get_support()]
+# fi = pipe_final_MPvsCTRL.named_steps['clf'].feature_importances_
+
+# fi_df_MPvsCTRL = pd.DataFrame(
+#     {
+#         "Genes": meta_table.loc[selected_features, "Gene Name"].values,
+#         "FI": fi,
+#     }, index=selected_features
+# ).sort_values(by="FI")[::-1]
+
+# test_df_MPvsCTRL = test_df
+# train_df_MPvsCTRL = train_df
+
+# y_pred_test_MPvsCTRL = y_test_pred
+# y_pred_train_MPvsCTRL = y_pred_train
+# y_prob_test_MPvsCTRL = y_prob_test
+# y_prob_train_MPvsCTRL = y_prob_train 
+```
+
+### Classification of MP vs Loa MF
+
+```{python}
+# # ---------------------
+# # 1. Load and filter data
+# # ---------------------
+
+# random_state=20250811
+
+# # only features with 100% completeness considered
+# missingness = df[meta_table.index].isna().mean()
+# low_missing_proteins = missingness[missingness <= 0.2].index
+# features_ml = list(set(low_missing_proteins) & set(meta_table.index))
+
+# # Filter only relevant classes
+# df_filtered = df[df['severity'].isin(['M', 'LL'])].copy().dropna(subset="age") # 'LLewmf'
+
+# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["age"].between(20, 40)) & (df_filtered["sex"]==0)].sample(20, random_state=45).index, inplace=True)
+# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==1)].sample(11, random_state=45).index, inplace=True)
+# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==0)].sample(12, random_state=45).index, inplace=True)
+
+
+# df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
+
+# df_filtered_prot = pd.DataFrame(
+#     KNNImputer().fit_transform(df_filtered[features_ml]),
+#     index=df_filtered.index,
+#     columns=features_ml,
+#     )
+# df_filtered = pd.concat(
+#     [df_filtered[["age", "sex", "severity",]], # "severity_combined"
+#     df_filtered_prot], axis=1)
+
+# # ---------------------
+# # 2. Define Test Set
+# # ---------------------
+
+# test_df = (
+#     df_filtered.groupby('severity', group_keys=False)
+#     .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
+# )
+
+# # Remaining data is training set
+# train_df = df_filtered.drop(index=test_df.index)
+
+# # ---------------------
+# # 3. Balance sample sizes in training data
+# # ---------------------
+# min_count = train_df['severity'].value_counts().min()
+# balanced_train_df = (
+#     train_df.groupby('severity', group_keys=False)
+#     .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
+# )
+
+# res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
+# for p in features_ml:
+#     res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="MP", p].median() - train_df.loc[train_df["severity"]=="LLmf", p].median()
+#     res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
+# res_roc.sort_index(inplace=True)
+# res_roc.sort_values("AUROC")
+
+# feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
+
+
+# print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
+
+# # ---------------------
+# # 4. Define feature sets
+# # ---------------------
+# meta_cols = ['severity', 'sex']
+# protein_cols = feat_high_roc
+
+# y = balanced_train_df['severity']
+
+# X_sets = {
+#     "Proteins only": balanced_train_df[protein_cols],
+#     # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+#     # "Age": balanced_train_df[["age"]],
+#     # "Sex": balanced_train_df[["sex"]],
+#     # "Proteins + FBC": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+#     # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
+#     # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
+#     # "Proteins + FBC + Sex": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
+#     # "Proteins + FBC + Age": balanced_train_df[
+#         # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
+    
+#     # "Proteins + FBC + Sex + Age": balanced_train_df[
+#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
+#     # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
+#     # "Sex + Age": balanced_train_df[["sex", "age"]],
+# }
+
+# # ---------------------
+# # 5. Define models
+# # ---------------------
+# scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
+
+# cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
+# n_trees = 20
+# max_depth = 2
+
+# models = {
+#     # "LogisticRegression": LogisticRegression(
+#         # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
+#     "RandomForest": RandomForestClassifier(
+#         random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
+#     # "GradientBoosting": GradientBoostingClassifier(
+#     #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
+#     # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
+# }
+
+# # Define different numbers of features to test
+# feature_counts = list(range(1, 35))
+
+
+# # Store learning curve results here
+# learning_curve_results = []
+
+# for set_name, X in X_sets.items():
+#     for model_name, model in models.items():
+#         for k in feature_counts:
+            
+#             # Make sure k doesn't exceed number of features
+#             k_adjusted = min(k, X.shape[1])
+
+#             # Create pipeline with feature selection + classifier
+#             pipe = Pipeline([
+#                 ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
+#                 ('clf', clone(model))
+#             ])
+
+#             # Initialize variables
+#             best_params = {}
+#             scores = {}
+
+#             y_prob = cross_val_predict(
+#                 pipe,
+#                 X,
+#                 y.loc[X.index],
+#                 cv=cv,
+#                 method="predict_proba"
+#             )[:, 1]
+
+#             scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
+
+#             avg_roc_auc = scores['test_roc_auc'].mean()
+#             avg_accuracy = scores["test_accuracy"].mean()
+
+#             learning_curve_results.append({
+#                 'Feature_Set': set_name,
+#                 'Model': model_name,
+#                 'Num_Features': k_adjusted,
+#                 'Mean_Accuracy': avg_accuracy,
+#                 'Mean_AUROC': avg_roc_auc,
+#                 # 'features': 
+#             })
+        
+
+#             if model_name=="RandomForest":
+#                 if k==21:
+#                     break
+
+# lc_df = pd.DataFrame(learning_curve_results)
+# # lc_df.to_csv(
+# #     os.path.join(
+# #         "results", "mansonella", "ml", "results_learning_curve.csv"
+# #     )
+# # )
+# # Plot learning curves
+# plt.figure(figsize=(12, 8))
+
+# for (set_name, model_name), group_df in lc_df.groupby(
+#     ['Feature_Set', 'Model']):
+#     plt.plot(
+#         group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
+
+# plt.xlabel("Number of Features Selected")
+# plt.ylabel("Mean Accuracy (cross-validated)")
+# plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
+# plt.legend(loc='lower right')
+# plt.grid(True)
+# plt.tight_layout()
+# # plt.savefig(
+# #     os.path.join(
+# #         "results", "mansonella", "ml", "learning_curve_cv_accuracy.png"
+# #     )
+# # )
+# plt.show()
+
+```
+
+```{python}
+
+# best_feature_set = "Proteins only"
+# best_model_name = "RandomForest"
+
+# print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
+
+# # Get the model object
+# best_model = models[best_model_name]
+
+# # Prepare training data
+# X_train_final = X_sets[best_feature_set]
+# y_train_final = y.loc[X_sets[best_feature_set].index]
+
+# # X_train_final =pipe_final train_df[selected_features]
+
+# # Prepare test data
+# test_features = test_df[list(X_train_final.columns)]
+# y_test = test_df['severity']
+
+# # Build and train pipeline
+
+# pipe_final_MPvsLLmf = Pipeline([
+#     ('pipe_final', SelectKBest(score_func=f_classif, k=21)),
+#     ('clf', best_model)
+# ])
+
+# pipe_final_MPvsLLmf.fit(X_train_final, y_train_final)
+
+# # Predict on train set
+# y_pred_test = pipe_final_MPvsLLmf.predict(test_features)
+# y_prob_test = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]  
+# # Predict on test set
+# y_pred_train = pipe_final_MPvsLLmf.predict(X_train_final)
+# y_prob_train = pipe_final_MPvsLLmf.predict_proba(X_train_final)[:, 1] 
+
+
+# # Evaluation metrics
+# test_metrics = pd.Series({
+#     'accuracy': accuracy_score(y_test, y_pred_test),
+#     'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
+#     'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
+#     'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
+#     'auroc': roc_auc_score(y_test, y_prob_test) 
+# })
+
+# train_metrics = pd.Series({
+#     'accuracy': accuracy_score(y_train_final, y_pred_train),
+#     'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
+#     'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
+#     'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
+#     'auroc': roc_auc_score(y_train_final, y_prob_train)
+# })
+
+# ml_results_MPvsLLmf = pd.concat([
+#     train_metrics, test_metrics
+# ], axis=1)
+# ml_results_MPvsLLmf.columns = ["Training_MPvsLLmf", "Test_MPvsLLmf"]
+
+# # Collect data for CM and ROC Curves
+
+# # Re-map labels to binary for ROC
+# label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
+# y_train_bin = y_train_final.map(label_mapping).values
+# y_test_bin = y_test.map(label_mapping).values
+
+# # 1. ROC Curve on Training Set (CV predictions)
+# y_train_proba_cv = cross_val_predict(
+#     pipe_final_MPvsLLmf, X_train_final, y_train_final,
+#     cv=cv, method='predict_proba'
+# )[:, 1]
+
+# fpr_train_MPvsLLmf, tpr_train_MPvsLLmf, _ = roc_curve(y_train_bin, y_train_proba_cv)
+# roc_auc_train_MPvsLLmf = auc(fpr_train_MPvsLLmf, tpr_train_MPvsLLmf)
+
+# # 2. ROC Curve on Test Set
+# y_test_proba = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]
+# fpr_test_MPvsLLmf, tpr_test_MPvsLLmf, _ = roc_curve(y_test_bin, y_test_proba)
+# roc_auc_test_MPvsLLmf = auc(fpr_test_MPvsLLmf, tpr_test_MPvsLLmf)
+
+
+# # Test set predictions at threshold 0.5
+# y_test_pred = (y_test_proba >= 0.5).astype(int)
+# cm_test_MPvsLLmf = pd.DataFrame(
+#     confusion_matrix(y_test_bin, y_test_pred), 
+#     index=["LLmf", "MP"], columns=["LLmf", "MP"])
+
+# y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
+# cm_train_MPvsLLmf = pd.DataFrame(
+#     confusion_matrix(y_train_bin, y_train_pred_cv),
+#     index=["LLmf", "MP"], columns=["LLmf", "MP"])
+
+```
+
+
+```{python}
+# selected_features = X_train_final.columns[pipe_final_MPvsLLmf.named_steps['pipe_final'].get_support()]
+# fi = pipe_final_MPvsLLmf.named_steps['clf'].feature_importances_
+
+# fi_df_MPvsLLmf = pd.DataFrame(
+#     {
+#         "Genes": meta_table.loc[selected_features, "Gene Name"].values,
+#         "FI": fi,
+#     }, index=selected_features
+# ).sort_values(by="FI")[::-1]
+
+# test_df_MPvsLLmf = test_df
+# train_df_MPvsLLmf = train_df
+
+# y_pred_test_MPvsLLmf = y_test_pred
+# y_pred_train_MPvsLLmf = y_pred_train
+# y_prob_test_MPvsLLmf = y_prob_test
+# y_prob_train_MPvsLLmf = y_prob_train 
+```
+
+Collect data from ML
+
+```{python}
+# test_df_MPvsCTRL["Test_Train"] ="Test"
+# train_df_MPvsCTRL["Test_Train"] ="Train"
+# test_df_MPvsLLmf["Test_Train"] ="Test"
+# train_df_MPvsLLmf["Test_Train"] ="Train"
+
+# test_df_MPvsCTRL.index.name ="Pat_Idx"
+# train_df_MPvsCTRL.index.name ="Pat_Idx"
+# test_df_MPvsLLmf.index.name ="Pat_Idx"
+# train_df_MPvsLLmf.index.name ="Pat_Idx"
+
+# test_df_MPvsCTRL["y_pred_test"] = y_pred_test_MPvsCTRL
+# train_df_MPvsCTRL["y_pred_train"] = y_pred_train_MPvsCTRL 
+# test_df_MPvsCTRL["y_prob_test"] = y_prob_test_MPvsCTRL
+# train_df_MPvsCTRL["y_prob_train"] = y_prob_train_MPvsCTRL
+
+# test_df_MPvsLLmf["y_pred_test"] = y_pred_test_MPvsLLmf
+# train_df_MPvsLLmf["y_pred_train"] = y_pred_train_MPvsLLmf 
+# test_df_MPvsLLmf["y_prob_test"] = y_prob_test_MPvsLLmf
+# train_df_MPvsLLmf["y_prob_train"] = y_prob_train_MPvsLLmf
+
+# df_ml_MPvsLLmf = pd.concat([
+#     train_df_MPvsLLmf, test_df_MPvsLLmf
+# ])
+# df_ml_MPvsCTRL = pd.concat([
+#     train_df_MPvsCTRL, test_df_MPvsCTRL
+# ])
+
+# pd.concat([
+#     # ml_results_MPvsCTRL,
+#     # ml_results_MPvsLLmf,
+#     fi_df_MPvsCTRL,
+#     fi_df_MPvsLLmf,
+# ])
+
+# writer = pd.ExcelWriter(os.path.join(
+#     res_path_mans, "ml_results_comb.xlsx"
+# ))
+
+# with writer:
+#     ml_results_MPvsCTRL.to_excel(
+#         writer, sheet_name="metrics_MvsCTRL", index=True)
+#     ml_results_MPvsLLmf.to_excel(
+#         writer, sheet_name="metricvs_MvsLL", index=True)
+#     fi_df_MPvsCTRL.to_excel(
+#         writer, sheet_name="FeatImpMvsCTRL", index=True)
+#     fi_df_MPvsLLmf.to_excel(
+#         writer, sheet_name="FeatImpMvsLL", index=True)
+#     df_ml_MPvsCTRL.to_excel(
+#         writer, sheet_name="ml_data_MvsCTRL", index=True)
+#     df_ml_MPvsLLmf.to_excel(
+#         writer, sheet_name="ml_data_MvsLL", index=True)
+
+```
+
+
+# M. Perstans  vs M. DEUX
+
+PCR Data shows some inconsistencies with original group annotations. 
+
+Remove inconclusive Cases from analysis
+
+Cohort Statistics for subspecies Level
+
+```{python}
+
+df[["Mansonella FRET Assay", "severity", "mp_mf"]]
+
+cond_ctrl = (df["mp_mf"]==0) & (df["severity"]=="CTRL") & (df["Mansonella FRET Assay"]=="Negative")
+cond_mp = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="perstans")
+cond_deux = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX")
+cond_mix = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX+perstans")
+
+df["severity_pcr"] = "Inconclusive"
+df.loc[cond_ctrl, "severity_pcr"] = "negative" 
+df.loc[cond_mp, "severity_pcr"] = "MP" 
+df.loc[cond_deux, "severity_pcr"] = "MD" 
+df.loc[cond_mix, "severity_pcr"] = "MDandMP" 
+
+
+```
+
+Inconsistencies between microscopic counts and pcr data
+
+groups 
+
+134 CTRL & PCR negative
+2 CTRL - PCR-> DEUX
+
+5 individuals in the LL group positive for Mansonella
+4 individuals in the LL_M group negative for Mansonella
+12 individuals in the M group negative for Mansonella
+  
+
+```{python}
+res_path_mans = "results/mansonella"
+df_subspecies = df[df["severity_pcr"].isin(["MP", "MD", "MDandMP"])]
+
+
+groups = ["MP", "MD", "MDandMP"]
+alpha = 0.05
+
+fbc = df.columns[41:53]
+
+###
+
+n_groups = df_subspecies["severity_pcr"].value_counts().loc[groups]
+n_groups.columns = ["N_group"]
+
+```
+
+```{python}
+
+## Study Demographics
+median_age =df_subspecies.groupby("severity_pcr")["age"].median()
+q25_age =df_subspecies.groupby("severity_pcr")["age"].quantile(0.25)
+q75_age =df_subspecies.groupby("severity_pcr")["age"].quantile(0.75)
+
+perc_sex_f = df_subspecies.groupby("severity_pcr").apply(
+    lambda g: (g['sex'] == 0).mean() * 100)
+
+median_mp_mf = df_subspecies[df_subspecies["mp_mf"].notna()].groupby("severity_pcr")["mp_mf"].median()
+q25_mp_mf  =df_subspecies.groupby("severity_pcr")["mp_mf"].quantile(0.25)
+q75_mp_mf  =df_subspecies.groupby("severity_pcr")["mp_mf"].quantile(0.75)
+median_mp_mf_f = df_subspecies[df_subspecies["mp_mf"].notna()][
+    df_subspecies["sex"]==0].groupby("severity_pcr")["mp_mf"].median()
+median_mp_mf_m = df_subspecies[df_subspecies["mp_mf"].notna()][
+    df_subspecies["sex"]==1].groupby("severity_pcr")["mp_mf"].median()
+
+_, p_age = kruskal(*[
+    df_subspecies[df_subspecies["severity_pcr"]==g]["age"].dropna().values for g in groups
+])
+
+median_fbc = df_subspecies.groupby("severity_pcr")[fbc].median()
+q25_fbc = df_subspecies.groupby("severity_pcr")[fbc].quantile(0.25)
+q75_fbc = df_subspecies.groupby("severity_pcr")[fbc].quantile(0.75)
+
+median_fbc.columns = [f"{fbc}_median" for fbc in fbc]
+q25_fbc.columns = [f"{fbc}_q25" for fbc in fbc]
+q75_fbc.columns = [f"{fbc}_q75" for fbc in fbc]
+
+overview_df_subspecies = pd.concat([
+    n_groups, 
+    q25_age, median_age, q75_age, 
+    perc_sex_f,
+    median_mp_mf, q25_mp_mf, q75_mp_mf], axis=1)
+
+overview_df_subspecies.columns = [
+    "N_groups", "age_q25", "age_median", "age_75",
+    "percSexF",
+    "mpmf_median", "mpmf_q25", "mpmf_q75",
+]
+
+overview_df_subspecies = pd.concat([
+    overview_df_subspecies, median_fbc, q25_fbc, q75_fbc], axis=1)
+
+overview_df_subspecies.fillna(0, inplace=True)
+overview_df_subspecies = overview_df_subspecies.T
+
+overview_df_subspecies.to_excel(
+    os.path.join(res_path_mans, "cohort_overview_subspecies.xlsx")
+)
+```
+
+
+```{python}
+## Statistics
+comb = list(combinations(groups, 2))
+
+contingency_table_sex = pd.crosstab(df['sex'], df_subspecies['severity_pcr'])
+chi2, p_chi_sex, dof, expected = chi2_contingency(contingency_table_sex)
+
+
+p_kruskal_age = kruskal(*[df_subspecies[df_subspecies["severity_pcr"]==g]["age"] for g in groups], nan_policy="omit").pvalue
+
+p_kruskal_mpmf = kruskal(*[df_subspecies[df_subspecies["severity_pcr"]==g]["mp_mf"] for g in groups], nan_policy="omit").pvalue
+
+p_kruskal_fbc = [kruskal(*[df_subspecies[df_subspecies["severity_pcr"]==g][f] for g in groups], nan_policy="omit").pvalue for f in fbc]
+
+p_kruskal_fbc = pd.Series(p_kruskal_fbc, index=[f"p_kruskal_{f}" for f in fbc])
+p_dunn_fbc = [posthoc_dunn([df_subspecies[df_subspecies["severity_pcr"]==g][f].dropna() for g in groups]) for f in fbc]
+
+# q_dunn_fbc = [posthoc_dunn([df_subspecies[df_subspecies["severity_pcr"]==g][f].dropna() for g in groups_sel], p_adjust="fdr_bh") for f in fbc]
+```
+
+```{python}
+
+global_stats = pd.Series()
+global_stats["p_kruskal_age"] = p_kruskal_age
+global_stats["p_chi_sex"] = p_chi_sex
+global_stats["p_kruskal_Mmf"] = p_kruskal_mpmf
+
+global_stats = pd.concat([
+    global_stats, p_kruskal_fbc
+])
+
+p_chi_sex_group.name = "sex"
+
+posthoc_stats = pd.DataFrame()
+posthoc_stats = pd.concat([
+    res_p_dunn_fbc, 
+    res_q_dunn_fbc], axis=1)
+posthoc_stats.loc["sex", :] = pd.concat([p_chi_sex_group, q_chi_sex_group])
+
+writer = pd.ExcelWriter(os.path.join(
+    res_path_mans, "stats_overview_subspecies.xlsx"
+))
+
+with writer:
+    global_stats.to_excel(
+        writer, sheet_name="global_analysis", index=True)
+```
+
+```{python}
+p_u_perstansVSdeux = pd.Series(
+    [mannwhitneyu(
+        df[df["severity_pcr"]=="MD"][p], 
+        df[df["severity_pcr"]=="MP"][p], nan_policy="omit").pvalue for p in meta_table.index], index=meta_table.index, name="p_u_MPvsMD")
+q_u_perstansVSdeux = pd.Series(
+    multipletests(p_u_perstansVSdeux, method="fdr_bh")[1], index=meta_table.index, name="qfdr_u_MPvsMD")
+
+groups_kruskal_pcr = ["MP", "MD", "MDandMP"]
+
+p_kruskal_pcr = pd.Series(
+    [kruskal(*[df[df["severity_pcr"]==g][p].dropna() for g in groups_kruskal_pcr]).pvalue for p in meta_table.index], index=meta_table.index, name="p_kruskal_subspecies")
+
+q_kruskal_pcr = pd.Series(multipletests(p_kruskal_pcr, method="fdr_bh")[1], index=meta_table.index, name="qfdr_kruskal_subspecies")
+
+p_kruskal_signif_pcr = p_kruskal_pcr[p_kruskal_pcr<0.05].index
+
+res_p_dunn_pcr = [posthoc_dunn([df[df["severity_pcr"]==g][p].dropna() for g in groups_kruskal_pcr])  for p in p_kruskal_signif_pcr]
+
+res_p_dunn_pcr = [
+    pd.DataFrame(p.values, index=groups_kruskal_pcr, columns=groups_kruskal_pcr).reset_index().melt(id_vars='index', var_name='colname', value_name='value') for p in res_p_dunn_pcr]
+
+res_p_dunn_pcr_lst = []
+for df_p in res_p_dunn_pcr:
+    df_p["pair"] = df_p.apply(lambda row: tuple(sorted([row['index'], row['colname']])), axis=1)
+    df_p = df_p[df_p["index"]!=df_p["colname"]]
+    df_p = df_p.drop_duplicates(subset="pair")
+    df_p.index = "p_dunn_" + df_p["colname"]+ "vs" + df_p["index"]
+    df_p = df_p.drop(["index", "colname", "pair"], axis=1)
+    res_p_dunn_pcr_lst.append(df_p)
+
+res_p_dunn_pcr = pd.concat([p.T for p in res_p_dunn_pcr_lst])
+res_p_dunn_pcr.index = p_kruskal_signif_pcr
+
+contrasts = [
+    ('MP', 'MD'),
+    ('MP', 'MDandMP'),
+    ('MD', 'MDandMP')]
+
+contrasts_median_fc_subspecies = pd.DataFrame([[
+    df.loc[df["severity_pcr"]==pair[0], p].median() - df.loc[df["severity_pcr"]==pair[1], p].median()
+     for pair in contrasts] for p in meta_table.index],
+    index=meta_table.index,
+    columns = ["MedFC_" +"vs".join(pair) for pair in contrasts])
+    
+```
+
+```{python}
+# Correlation of mp-mf in subspecies
+r_srho_mpmf_mp = [spearmanr(
+    df[(df["severity_pcr"]=="MP")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MP")][p], nan_policy="omit")[0] for p in meta_table.index]
+p_srho_mpmf_mp = [spearmanr(
+    df[(df["severity_pcr"]=="MP")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MP")][p], nan_policy="omit")[1] for p in meta_table.index]
+q_srho_mpmf_mp = multipletests(p_srho_mpmf_mp, method="fdr_bh")[1]
+
+r_srho_mpmf_mpmd = [spearmanr(
+    df[(df["severity_pcr"]=="MDandMP")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MDandMP")][p], nan_policy="omit")[0] for p in meta_table.index]
+p_srho_mpmf_mpmd = [spearmanr(
+    df[(df["severity_pcr"]=="MDandMP")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MDandMP")][p], nan_policy="omit")[1] for p in meta_table.index]
+q_srho_mpmf_mpmd = multipletests(p_srho_mpmf_mpmd, method="fdr_bh")[1]
+
+r_srho_mpmf_md = [spearmanr(
+    df[(df["severity_pcr"]=="MD")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MD")][p], nan_policy="omit")[0] for p in meta_table.index]
+p_srho_mpmf_md = [spearmanr(
+    df[(df["severity_pcr"]=="MD")]["mp_mf"], 
+    df[(df["severity_pcr"]=="MD")][p], nan_policy="omit")[1] for p in meta_table.index]
+q_srho_mpmf_md = multipletests(p_srho_mpmf_md, method="fdr_bh")[1]
+
+corr_df_subspecies = pd.concat(
+    [pd.Series(x) for x in [
+        r_srho_mpmf_mp, p_srho_mpmf_mp, q_srho_mpmf_mp,
+        r_srho_mpmf_mpmd, p_srho_mpmf_mpmd, q_srho_mpmf_mpmd,
+        r_srho_mpmf_md, p_srho_mpmf_md, q_srho_mpmf_md
+    ]], axis=1
+)
+corr_df_subspecies.index = meta_table.index
+corr_df_subspecies.columns = [
+    "r_srho_Mmf_MP", "p_srho_Mmf_MP", "qfdr_srho_Mmf_MP",
+    "r_srho_Mmf_MDandMP", "p_srho_Mmf_MDandMP", "qfdr_srho_Mmf_MDandMP",
+    "r_srho_Mmf_MD", "p_srho_Mmf_MD", "qfdr_srho_Mmf_MD"
+]
+
+```
+
+```{python}
+results_pcr_mp = results_severity.iloc[:, :4]
+results_pcr_mp = results_pcr_mp.merge(corr_df_subspecies, left_index=True, right_index=True)
+
+results_pcr_mp["N_deux"] = df[
+    df["severity_pcr"]=="MD"][meta_table.index].count()
+results_pcr_mp["N_perstans"] = df[
+    df["severity_pcr"]=="MP"][meta_table.index].count()
+results_pcr_mp["N_deuxORperstans"] = df[
+    df["severity_pcr"]=="MDandMP"][meta_table.index].count()
+
+results_pcr_mp["MedAbund_MD"] = df[
+    df["severity_pcr"]=="MD"][meta_table.index].median()
+results_pcr_mp["MedAbund_MP"] = df[
+    df["severity_pcr"]=="MP"][meta_table.index].median()
+results_pcr_mp["MedAbund_MDandMP"] = df[
+    df["severity_pcr"]=="MDandMP"][meta_table.index].median()
+
+results_pcr_mp = pd.concat([
+    results_pcr_mp, p_u_perstansVSdeux, q_u_perstansVSdeux, p_kruskal_pcr, q_kruskal_pcr,
+    res_p_dunn_pcr, contrasts_median_fc_subspecies
+], axis=1)
+
+results_pcr_mp["diff_abund_subspecies"] =False
+results_pcr_mp["diff_abund_MPvsMD"] =False
+results_pcr_mp["diff_abund_MPvsMDandMP"] =False
+results_pcr_mp["diff_abund_MDvsMDandMP"] =False
+
+
+
+results_pcr_mp.loc[
+    results_pcr_mp["p_kruskal_subspecies"] < 0.05,
+    "diff_abund_subspecies"
+] = True
+results_pcr_mp.loc[
+    (results_pcr_mp["MedFC_MPvsMD"].abs() > 0.2) &
+    (results_pcr_mp["p_dunn_MPvsMD"] < 0.05), 
+    "diff_abund_MPvsMD"
+] = True
+results_pcr_mp.loc[
+    (results_pcr_mp["MedFC_MPvsMDandMP"].abs() > 0.2) &
+    (results_pcr_mp["p_dunn_MPvsMDandMP"] < 0.05), 
+    "diff_abund_MPvsMDandMP"
+] = True
+results_pcr_mp.loc[
+    (results_pcr_mp["MedFC_MDvsMDandMP"].abs() > 0.2) &
+    (results_pcr_mp["p_dunn_MDvsMDandMP"] < 0.05), 
+    "diff_abund_MDvsMDandMP"
+] = True
+
+results_pcr_mp.to_csv(
+    os.path.join(res_path_mans, "diff_abund_analysis_subspecies.csv"), index=True
+)
+```
+
+# Figures
+
+### Volcano LN vs MP (1A)
+```{python}
+results_severity_plotting = results_severity.copy()
+for col in [c for c in results_severity_plotting.columns if "p_u" in c]:
+    results_severity_plotting["negLog10_" + col] = -np.log10(results_severity_plotting[col])
+for col in [c for c in results_severity_plotting.columns if "qfdr_u" in c]:
+    results_severity_plotting["negLog10_" + col] = -np.log10(results_severity_plotting[col])
+
+#negLog10_qfdr_u_MPvsCTRL
+#negLog10_p_u_MPvsCTRL
+
+p_vals = "negLog10_p_u_MvsCTRL"
+p_vals = "negLog10_qfdr_u_MvsCTRL"
+
+fig, ax = plt.subplots(1,1, figsize=(5,5))
+
+
+signif = results_severity_plotting[(~results_severity_plotting[f"MedFC_MvsCTRL"].between(-0.2, 0.2)) & (results_severity_plotting[p_vals]>2)].index
+
+sns.scatterplot(
+    ax=ax, alpha=0.5,
+    data = results_severity_plotting.drop(signif), c="gray",
+    x=f"MedFC_MvsCTRL", y=p_vals
+)
+sns.scatterplot(
+    ax=ax, alpha=0.5,
+    data = results_severity_plotting.loc[signif], c=sns.color_palette("colorblind")[3],
+    x=f"MedFC_MvsCTRL", y=p_vals
+)
+
+features_annot = results_severity_plotting[(~results_severity_plotting[f"MedFC_MvsCTRL"].between(-0.2, 0.2)) & (results_severity_plotting[p_vals]>2)].index
+# for f in features_annot:
+#     ax.text(
+#         x=results_severity_plotting[f"MedFC_MPvsCTRL"].loc[f],
+#         y=results_severity_plotting[p_vals].loc[f],
+#         s=meta_table.loc[f, "Gene Name"]
+#     )
+
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+
+# ax.set_title(c)
+ax.set_xlabel("Median $ Log_{2} FC$")
+ax.set_ylabel("$-Log_{10} (q_{u})$")
+ax.set_title("M vs. CTRL")
+
+ax.axhline(2, ls="--", c="gray")
+# ax.axvline(0, ls="--", c="gray")
+ax.axvline(-.2, ls="--", c="gray")
+ax.axvline(.2, ls="--", c="gray")
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella", "plots", "volcano", 'MPvsCTRL_nolabels.png'), dpi=600)
+plt.show()
+```
+
+### Boxplots per proteins (1B) M vs Ctrls
+```{python}
+colors_severity_mans = {
+    "CTRL": sns.color_palette("colorblind")[0],
+    "MP": sns.color_palette("colorblind")[3],
+}
+
+severity_colors = [
+    sns.color_palette("colorblind")[0],
+    sns.color_palette("colorblind")[3],
+]
+
+target_severity_mans = "severity"
+order_severity_mans = ['CTRL', 'M']
+order_severity_mans_label = ['CTRL', 'M']
+
+for p in list(meta_table.index):    
+
+    fig, ax = plt.subplots(1,1, figsize=(2,3))
+    sns.boxplot(
+        data=data_mans, 
+        x=target_severity_mans, y=p, order=order_severity_mans,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=data_mans, x=target_severity_mans, y=p, 
+        order=order_severity_mans, hue=target_severity_mans, alpha=0.3, 
+        palette=list(colors_severity_mans.values()), hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_mans.values()))
+
+    ax.set_ylabel(f"$Log_2$ abundance {meta_table.loc[p, 'Gene Name']}")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label, rotation=0)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+    ax.set_title("$q_{u}$: "+  f"{results_severity.loc[p, 'qfdr_u_MvsCTRL']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "plots", "boxplots", "severity_mvsctrl", f"{meta_table.loc[p, 'Gene Name']}_{p}_{'signif' if results_severity.loc[p, 'qfdr_u_MvsCTRL']<0.05 else ''}.png"), dpi=600)
+    plt.close()
+    
+
+```
+
+### Boxplots per proteins (1C & 1F) M vs Ctrls
+```{python}
+colors_severity_mans = {
+    "CTRL": sns.color_palette("colorblind")[0],
+    "MP": sns.color_palette("colorblind")[3],
+    "LLmf": sns.color_palette("colorblind")[1],
+    "LLmf_MP": sns.color_palette("colorblind")[4],
+}
+
+severity_colors = [
+    sns.color_palette("colorblind")[0],
+    sns.color_palette("colorblind")[3],
+    sns.color_palette("colorblind")[4],
+    sns.color_palette("colorblind")[1]
+]
+
+target_severity_mans = "severity"
+order_severity_mans = ['CTRL', 'M', 'LL_M', 'LL']
+order_severity_mans_label = ['CTRL', 'M', 'M+LL', 'LL']
+
+for p in list(meta_table.index):    
+
+    fig, ax = plt.subplots(1,1, figsize=(3,3))
+    sns.boxplot(
+        data=data_mans, 
+        x=target_severity_mans, y=p, order=order_severity_mans,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=data_mans, x=target_severity_mans, y=p, 
+        order=order_severity_mans, hue=target_severity_mans, alpha=0.3, 
+        palette=list(colors_severity_mans.values()), hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_mans.values()))
+
+    ax.set_ylabel(f"$Log_2$ abundance {meta_table.loc[p, 'Gene Name']}")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label, rotation=0)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.axvline(0.5, c="k", ls="--")
+
+    ax.set_title("$p_{kruskal, infected}$: "+  f"{results_severity.loc[p, 'p_kruskal_severity']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "plots", "boxplots", "severity", f"{meta_table.loc[p, 'Gene Name']}_{p}_{'signif' if results_severity.loc[p, 'p_kruskal_severity']<0.05 else ''}.png"), dpi=600)
+    plt.close()
+
+```
+
+
+### FC Disease comparison 
+
+```{python}
+
+signif_proteins_subspecies = [
+    "P02042", "P01034", "A0A075B6J9", "P02747", "P61769", "Q15166", "Q15848",
+    "P25311", "P18065", "A0A0B4J1Y9"]
+
+med_ctrl = df[df["severity_pcr"]=="negative"][signif_proteins_subspecies].median()
+med_md = df[df["severity_pcr"]=="MD"][signif_proteins_subspecies].median()
+med_mdandmp = df[df["severity_pcr"]=="MDandMP"][signif_proteins_subspecies].median()
+med_mp = df[df["severity_pcr"]=="MP"][signif_proteins_subspecies].median()
+
+fc_to_ctrl_df = pd.DataFrame(
+    {
+        "MD - CTRL": med_md-med_ctrl,
+        "MDandMP - CTRL": med_mdandmp-med_ctrl,
+        "MP - CTRL": med_mp-med_ctrl,
+    }
+)
+abund_df = pd.DataFrame(
+    {
+        "CTRL": med_ctrl,
+        "MD": med_ctrl,
+        "MDandMP - CTRL": med_mdandmp,
+        "MP": med_mp,
+    }
+)
+fc_to_ctrl_df = fc_to_ctrl_df.merge(
+    results_pcr_mp["Gene Name"], left_index=True, right_index=True
+) 
+```
+
+```{python}
+# for covid we are using Kuebler, DIA-NN 1.8.1 high flow TimsTof
+
+kuebler_df_prot = pd.read_table(
+    r"data\analysis\mansonella\wangziy_20231013+1635_30-0090-kubler_sample_600IS_hpro3\report.pg_matrix.tsv", index_col="Protein.Group").iloc[:, 4:]
+kuebler_meta = pd.read_excel(
+    r"data\analysis\mansonella\wangziy_20231013+1635_30-0090-kubler_sample_600IS_hpro3\20210527_Kuebler_new_metadata_v3.xlsx", index_col="Id"
+)
+kuebler_df_prot.columns = [c.split("_")[7] for c in kuebler_df_prot.columns]
+kuebler_df_prot = kuebler_df_prot.T
+
+kuebler_df_prot = kuebler_df_prot.loc[:, kuebler_df_prot.isna().mean()<0.2]
+kuebler_df_prot = np.log2(kuebler_df_prot+1)
+
+kuebler_proteins = kuebler_df_prot.columns
+
+kuebler_df = kuebler_meta.merge(kuebler_df_prot, left_index=True, right_index=True)
+
+
+fc_covid = kuebler_df.loc[kuebler_df["Type"]=="severe/critical", kuebler_proteins].median() - kuebler_df.loc[kuebler_df["Type"]=="healthy", kuebler_proteins].median()  
+
+
+results_loa = pd.read_excel(
+    os.path.join(
+        "results", "loaloa", "manuscript", "Supplement", "Table_S3.xlsx"
+    ), index_col=0, sheet_name="LNvsInfected_05"
+)
+mpox_res = pd.read_table(os.path.join(
+    "data", "analysis", "malaria", "other_studies", "mpox", "Results_LIMMA_30-0066_2022-06-30_17h18m.txt"), index_col=0
+)
+
+prot_signif_mpox = mpox_res[mpox_res["adj.P.Val_ClassMPXV - Classcontrol"]<0.05]
+prot_signif_covid = mpox_res[mpox_res["adj.P.Val_ClassCovid19 - Classcontrol"]<0.05]
+prot_signif_loa = results_loa[results_loa["adj.P.Val"]<0.05]
+prot_signif_mp = results_severity[results_severity["diff_abund_MvsCTRL"]]
+
+
+fc_df = pd.concat([
+    results_loa["logFC"],
+    results_severity["MedFC_MvsCTRL"], 
+    mpox_res["logFC_ClassMPXV - Classcontrol"],
+    fc_covid
+], axis=1)
+fc_df.columns = ["L. loa", "M.p + M.D.", "Mpox", "COVID-19"]
+
+fig, ax = plt.subplots(1, 1, figsize=(6,3))
+sns.swarmplot(
+    ax=ax,
+    data=fc_df, orient="v", 
+    palette=[
+        sns.color_palette("colorblind")[1], 
+        sns.color_palette("colorblind")[3], "lightblue", "cyan"
+    ], alpha=0.5
+
+)
+sns.violinplot(
+    ax=ax,
+    data=fc_df, orient="v", fill=False,
+    palette=["gray", "gray", "gray", "gray"
+        # sns.color_palette("colorblind")[1], 
+        # sns.color_palette("colorblind")[3], "lightblue", "cyan"
+    ], alpha=0.5
+
+)
+ax.set_ylabel("Median $Log_2$ FC vs Control Group")
+ax.set_xlabel("Diseases")
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))    
+ax.axhline(0, ls="--", c="k", zorder=0)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(
+        "results", "mansonella", "manuscript", "compare_disease_fc.png"
+    ), dpi=400
+)
+```
+
+### Correlation Proteins v M mf (1G, upper panel)
+
+```{python}
+data_mans_mp = df[df["log2_mp_mf"]>0]
+
+for p in meta_table.index:
+
+    p_gene = meta_table.loc[p, "Gene Name"]
+
+    fig, ax = plt.subplots(1,1, figsize=(4,4))
+    sns.scatterplot(
+        data=data_mans_mp, 
+        x="log2_mp_mf", y=p,
+        color=sns.color_palette("colorblind")[3], alpha=0.7,
+        legend=False, edgecolor="k", linewidth=1)
+    
+    data_mans_p = data_mans_mp.copy()
+    data_mans_p.dropna(subset=p, inplace=True)
+
+    a, b = np.polyfit(data_mans_p["log2_mp_mf"], data_mans_p[p], deg=1)
+    y_p_fit = a * data_mans_p["log2_mp_mf"] + b 
+    ax.plot(data_mans_p["log2_mp_mf"], y_p_fit, c="k", zorder=0)
+
+    m, b = np.polyfit(df_mf["log2_mp_mf"], df_mf[p], deg=1)
+    y_p_fit = m * df_mf["log2_mp_mf"] +b 
+
+    plt.plot(df_mf["log2_mp_mf"], y_p_fit, c="k", zorder=0)
+
+    ax.set_ylabel(f"$Log_2$ abundance {p_gene}")
+    ax.set_xlabel(f"$Log_2$ Mansonella parasites per mL")
+    # ax.spines[['right', 'top']].set_visible(False)
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.set_title("r: "+  f"{results_severity.loc[p, 'r_srho_Mmf_M']:.2f}, "+"q: "+  f"{results_severity.loc[p, 'r_srho_Mmf_M']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    
+    plt.savefig(
+        os.path.join("results", "mansonella", "plots", "parasite_count",  f'{results_severity.loc[p, "r_srho_Mmf_M"]:.2f}_para{p_gene}.png'), dpi=600)
+    # plt.close()
+    # break
+```
+
+### Correlation IGLC7 vs LL mf (1G, lower panel)
+```{python}
+# df_metabolomics_bio_inf = df_metabolomics_bio[
+#     df_metabolomics_bio["severity_pcr"]!="negative"]
+# df_metabolomics_bio_inf["log2_mp_mf"] = np.log2(
+#     df_metabolomics_bio_inf["mp_mf"]
+# )
+
+cmap = {"MF":(0.8705882352941177, 0.5607843137254902, 0.0196078431372549)}
+
+data_mans_mf = data_mans[data_mans["disease severity"]=="MF"]
+data_mans_mf["log2_llmf"] = np.log2(data_mans_mf["ll_mf"]+1)
+
+p = meta_table[meta_table["Gene Name"]=="IGLC7"].index[0]
+gene = "IGLC7"
+fig, ax = plt.subplots(1,1, figsize=(4,4))
+sns.scatterplot(
+    data=data_mans_mf, x="log2_llmf", y=p,
+    hue="disease severity", alpha=0.7, 
+    palette=cmap, 
+    legend=False, edgecolor="k", linewidth=1
+    # hue_order=order_severity_mans, 
+    # edgecolor=list(colors_severity_matched.values())
+    )
+
+data_mans_p = data_mans_mf.copy()
+data_mans_p.dropna(subset=p, inplace=True)
+
+a, b = np.polyfit(data_mans_p["log2_llmf"], data_mans_p[p], deg=1)
+y_p_fit = a * data_mans_p["log2_llmf"] + b 
+ax.plot(data_mans_p["log2_llmf"], y_p_fit, c="k", zorder=0)
+
+r = results_severity.loc[p, "r_srho_LLmf_LL"]
+pval = results_severity.loc[p, "p_srho_LLmf_LL"]
+
+# ax.set_ylabel(m)
+ax.set_xlabel("$Log_2$ Loa Loa parasites per mL")
+ax.set_ylabel(f"$Log_2$ abundance {gene}")
+ax.set_title(f"r: {r:.2f}, p: {pval:.2e}", fontsize=11)
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+# ax.get_legend().set_title("")
+# ax.set_title("$q_{kruskal, infected}$: "+  f"{results_severity.loc[p, 'p_kruskal_severity']:.2e}", fontsize=11)
+plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella",  "plots" ,f"{r:.2f}_llMFvs{p}.png"), dpi=400)
+# plt.close()
+            
+```
+
+### Machine Learning
+
+
+
+```{python}
+ml_data_LLM = pd.read_excel(
+    os.path.join("results", "mansonella", "ml_results_comb.xlsx"),
+    sheet_name="ml_data_MvsLL", index_col=0
+    )
+fi_df_MPvsCTRL = pd.read_excel(
+    os.path.join("results", "mansonella", "ml_results_comb.xlsx"),
+    sheet_name="FeatImpMvsCTRL"
+    )
+fi_df_MPvsLLmf  = pd.read_excel(
+    os.path.join("results", "mansonella", "ml_results_comb.xlsx"),
+    sheet_name="FeatImpMvsLL"
+    )
+```
+
+```{python}
+ml_data_LLM = ml_data_LLM.merge(df[["mp_mf", "ll_mf"]], left_index=True, right_index=True)
+ml_data_LLM.dropna(subset="y_prob_test", inplace=True)
+
+ml_data_LLM["mp_mf"].replace({0:np.nan}, inplace=True)
+ml_data_LLM["ll_mf"].replace({0:np.nan}, inplace=True)
+
+ml_data_LLM["log2_ll_mf"] = np.log2(ml_data_LLM["ll_mf"]+1)
+ml_data_LLM["log2_mp_mf"] = np.log2(ml_data_LLM["mp_mf"]+1)
+```
+
+```{python}
+pearsonr(ml_data_LLM["y_prob_test"], ml_data_LLM["log2_mp_mf"], nan_policy="omit")
+# spearmanr(ml_data_LLM["y_prob_test"], ml_data_LLM["log2_ll_mf"], nan_policy="omit")
+```
+
+```{python}
+sns.scatterplot(ml_data_LLM, x="y_prob_test", y="log2_ll_mf", label="LL")
+sns.scatterplot(ml_data_LLM, x="y_prob_test", y="log2_mp_mf", label="M")
+```
+
+```{python}
+ml_data["Pat_Idx"]
+```
+
+Confusion Matrices
+```{python}
+# fig, axs = plt.subplots(2, 2, figsize=(6,6))
+
+# sns.heatmap(
+#     ax=axs[0, 0], data=cm_train_MPvsCTRL, annot=True, 
+#     cmap=sns.color_palette("Oranges"), cbar=False, 
+#     linewidths=1, linecolor='black')
+# sns.heatmap(
+#     ax=axs[0, 1], data=cm_test_MPvsCTRL, annot=True, 
+#     cmap=sns.color_palette("Oranges"), cbar=False, 
+#     linewidths=1, linecolor='black')
+# sns.heatmap(
+#     ax=axs[1, 0], data=cm_train_MPvsLLmf, annot=True, 
+#     cmap=sns.color_palette("Oranges"), cbar=False, 
+#     linewidths=1, linecolor='black')
+# sns.heatmap(
+#     ax=axs[1, 1], data=cm_test_MPvsLLmf, annot=True, 
+#     cmap=sns.color_palette("Oranges"), cbar=False, 
+#     linewidths=1, linecolor='black')
+
+# axs[0, 0].set_title("Train/Validation")
+# axs[0, 1].set_title("Test")
+
+# fig.supxlabel("True Groups")
+# fig.supylabel("Predicted Groups")
+# plt.tight_layout()
+# plt.savefig(
+#     os.path.join("results", "mansonella", "ml", "cm_rf.png"), dpi=600)
+
+```
+
+
+```{python}
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+
+cmap_MvsCTRL = LinearSegmentedColormap.from_list(
+    "MvsCTRL",
+    [(0.98, 0.98, 0.98), sns.color_palette("colorblind")[3]],
+    N=10
+)
+cmap_MvsLL = LinearSegmentedColormap.from_list(
+    "MvsLL",
+    [(0.98, 0.98, 0.98), sns.color_palette("colorblind")[1]],
+    N=10
+)
+```
+Feature Import Barplots
+```{python}
+fig, ax = plt.subplots(1,1, figsize=(3,3))
+sns.barplot(
+    fi_df_MPvsCTRL.set_index("Genes")["FI"].iloc[:10], orient="h", ax=ax, 
+    palette=cmap_MvsCTRL(np.linspace(0, 1, 10))[::-1])
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+ax.set_ylabel("")
+ax.set_xlabel(f"Feature Importance - M vs CTRL")
+
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella", "ml", "fi_rf_MvsCTRL.png"), dpi=600)
+```
+
+```{python}
+fig, ax = plt.subplots(1,1, figsize=(3,3))
+sns.barplot(
+    fi_df_MPvsLLmf.set_index("Genes")["FI"].iloc[:10], orient="h", ax=ax, 
+    palette=cmap_MvsLL(np.linspace(0, 1, 10))[::-1])
+
+# fig.supylabel(f"Proteins")
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+ax.set_ylabel("")
+ax.set_xlabel(f"Feature Importance - M vs LL")
+
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella", "ml", "fi_rf_MvsLL.png"), dpi=600)
+```
+
+
+```{python}
+
+
+```
+
+ROC Curve - Test (Fig 1E)
+```{python}
+# fig, ax = plt.subplots(1,1, figsize=(5,5))
+# ax.plot(
+#     fpr_test_MPvsCTRL, tpr_test_MPvsCTRL, label=f'M vs CTRL (AUROC = {roc_auc_test_MPvsCTRL:.2f})', color=sns.color_palette("colorblind")[3], lw=4,)
+# ax.plot(
+#     fpr_test_MPvsLLmf, tpr_test_MPvsLLmf, label=f'M vs LL (AUROC = {roc_auc_test_MPvsLLmf:.2f})', color=sns.color_palette("colorblind")[1], lw=4)
+# ax.plot([0, 1], [0, 1], 'k--')
+# ax.set_ylabel(f"TPR (Sensitivity)")
+# ax.set_xlabel(f"FPR (1 - Specificity)")
+
+# ax.spines['left'].set_linewidth(2)  # Left border thickness
+# ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+# ax.spines['right'].set_linewidth(2) # Bottom border thickness
+# ax.spines['top'].set_linewidth(2) # Bottom border thickness
+
+# plt.legend(loc='lower right')
+# plt.grid(True)
+
+# plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+# plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+# plt.tight_layout()
+# plt.savefig(
+#     os.path.join("results", "mansonella", "ml", "ROC_rf_test.png"), dpi=600)
+```
+
+ROC Curve - Train
+```{python}
+# fig, ax = plt.subplots(1,1, figsize=(5,5))
+# ax.plot(
+#     fpr_train_MPvsCTRL, tpr_train_MPvsCTRL, label=f'MP vs CTRL (AUROC = {roc_auc_train_MPvsCTRL:.2f})', color=sns.color_palette("colorblind")[3], lw=4,)
+# ax.plot(
+#     fpr_train_MPvsLLmf, tpr_train_MPvsLLmf, label=f'MP vs LLmf (AUROC = {roc_auc_train_MPvsLLmf:.2f})', color=sns.color_palette("colorblind")[1], lw=4)
+# ax.plot([0, 1], [0, 1], 'k--')
+# ax.set_ylabel(f"TPR (Sensitivity)")
+# ax.set_xlabel(f"FPR (1 - Specificity)")
+
+# ax.spines['left'].set_linewidth(2)  # Left border thickness
+# ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+# ax.spines['right'].set_linewidth(2) # Bottom border thickness
+# ax.spines['top'].set_linewidth(2) # Bottom border thickness
+
+# plt.legend(loc='lower right')
+# plt.grid(True)
+
+# plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+# plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+# plt.tight_layout()
+# plt.savefig(
+#     os.path.join("results", "mansonella", "ml", "ROC_rf_train.png"), dpi=600)
+```
+
+### Correlation with age 
+
+Correlation mpmf age
+
+```{python}
+
+df["log2_mp_mf"] = np.log2(df["mp_mf"]+1)
+df_mf = df[df["mp_mf"]>0]
+
+fig, ax = plt.subplots(1,1, figsize=(4,4))
+sns.scatterplot(
+    data=df_mf[df_mf["disease severity"]=="MP"], 
+    x="log2_mp_mf", y="age",
+    color=sns.color_palette("colorblind")[3], alpha=0.7,
+    legend=False, edgecolor="k", linewidth=1)
+
+df_mf_com = df_mf[["log2_mp_mf", "age"]].dropna(how="any")
+m, b = np.polyfit(df_mf_com["log2_mp_mf"], df_mf_com["age"], deg=1)
+y_p_fit = m * df_mf_com["log2_mp_mf"] +b 
+
+plt.plot(df_mf_com["log2_mp_mf"], y_p_fit, c="k", zorder=0)
+
+r, p = spearmanr(
+    df[(df["severity"]=="M")]["mp_mf"], 
+    df[(df["severity"]=="M")]["age"], nan_policy="omit")
+
+ax.set_ylabel(f"Age in years")
+ax.set_xlabel(f"$Log_2$ parasites per mL")
+# ax.spines[['right', 'top']].set_visible(False)
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))
+ax.set_title("r: "+  f"{r:.2f}, "+"p: "+  f"{p:.2e}", fontsize=11)
+plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+plt.tight_layout()
+
+plt.savefig(
+    os.path.join("results", "mansonella", "manuscript", "corr_mpmf_age.png"), dpi=600)
+plt.close()
+```
+
+```{python}
+
+df_plot = df[df["severity"].isin(["CTRL", "M"])]
+for p, gene in zip(["P01860", "P01871-2"], ["IGHG3", "IGHM"]):
+
+    r_ctrl, p_ctrl = spearmanr(
+    df[(df["severity"]=="CTRL")][p], 
+    df[(df["severity"]=="CTRL")]["age"], nan_policy="omit")
+    r_m, p_m = spearmanr(
+    df[(df["severity"]=="M")][p], 
+    df[(df["severity"]=="M")]["age"], nan_policy="omit")
+
+    fig, ax = plt.subplots(1,1, figsize=(4,4))
+    sns.scatterplot(
+        ax=ax, data=df_plot[df_plot["severity"]=="CTRL"], x=p, y="age", c="tab:blue", label="$r_{CTRL}$ ="+f" {r_ctrl:.2f}")
+    sns.scatterplot(
+        ax=ax, data=df_plot[df_plot["severity"]=="M"], x=p, y="age", c="tab:orange", label="$r_{M}$ ="+f" {r_m:.2f}")
+    ax.set_xlabel("$Log_2$ abundance " + gene)
+    ax.set_ylabel("Age in years")
+
+    for g, c in zip(
+        ["CTRL", "M"], ["tab:blue", "tab:orange"]):
+        df_plot_g = df_plot[df_plot["severity"]==g]
+        df_mf_com = df_plot_g[[p, "age"]].dropna(how="any")
+        m, b = np.polyfit(df_mf_com[p], df_mf_com["age"], deg=1)
+        y_p_fit = m * df_mf_com[p] +b 
+
+        plt.plot(df_mf_com[p], y_p_fit, c=c, zorder=0, lw=2)
+
+
+
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join("results", "mansonella", "manuscript", f"corr_{gene}_age.png"), dpi=600)
+    # plt.close()
+    
+```
+
+
+### Volcano MD vs MP (2A)
+
+```{python}
+results_pcr_mp_plotting = results_pcr_mp.copy()
+
+results_pcr_mp_plotting["negLog10_p_u"] = -np.log10(results_pcr_mp_plotting["p_u_MPvsMD"])
+
+#negLog10_qfdr_u_MPvsCTRL
+#negLog10_p_u_MPvsCTRL
+
+p_vals = "negLog10_p_u"
+
+fig, ax = plt.subplots(1,1, figsize=(5,5))
+
+
+signif = results_pcr_mp_plotting[(~results_pcr_mp_plotting[f'MedFC_MPvsMD'].between(-0.2, 0.2)) & (results_pcr_mp_plotting[p_vals]>1.3)].index
+
+
+sns.scatterplot(
+    ax=ax, alpha=0.5,
+    data = results_pcr_mp_plotting.drop(signif), c="gray",
+    x=f'MedFC_MPvsMD', y=p_vals
+)
+sns.scatterplot(
+    ax=ax, alpha=0.5,
+    data = results_pcr_mp_plotting.loc[signif], c=sns.color_palette("Oranges", n_colors=10)[9],
+    x=f'MedFC_MPvsMD', y=p_vals
+)
+
+features_annot = results_pcr_mp_plotting[(~results_pcr_mp_plotting[f'MedFC_MPvsMD'].between(-0.2, 0.2)) & (results_pcr_mp_plotting[p_vals]>1.3)].index
+# for f in features_annot:
+#     ax.text(
+#         x=results_pcr_mp_plotting[f"MedFC_MPvsMD"].loc[f],
+#         y=results_pcr_mp_plotting[p_vals].loc[f],
+#         s=meta_table.loc[f, "Gene Name"]
+#     ) 
+
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+
+# ax.set_title(c)
+ax.set_xlabel("Median $ Log_{2} FC$")
+ax.set_ylabel("$-Log_{10} (p_{u})$")
+ax.set_title("MP vs. MD")
+
+ax.axhline(1.3, ls="--", c="gray")
+# ax.axvline(0, ls="--", c="gray")
+ax.axvline(-.2, ls="--", c="gray")
+ax.axvline(.2, ls="--", c="gray")
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella", "plots", "volcano", 'DEUXvsPerstans_nolabels.png'), dpi=600)
+plt.show()
+```
+
+
+### Boxplots Ctrl-MD-md+MP-MP (Fig 2B)
+```{python}
+# colors_severity_mans = {
+#     "CTRL": sns.color_palette("colorblind")[0],
+#     "MD": sns.color_palette("colorblind")[3],
+#     "MDandMP": sns.color_palette("colorblind")[1],
+#     "MP": sns.color_palette("colorblind")[4],
+# }
+
+colors_severity_mans = {
+    "negative": "tab:blue",
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MDandMP": sns.color_palette("Oranges", n_colors=10)[6],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+severity_colors = colors_severity_mans.values()
+
+target_severity_mans = "severity_pcr"
+order_severity_mans = ['negative', 'MD', 'MDandMP', 'MP']
+order_severity_mans_label = ['CTRL', 'MD', 'MD+MP', 'MP']
+
+for p in list(meta_table.index):    
+
+    fig, ax = plt.subplots(1,1, figsize=(3,3))
+    sns.boxplot(
+        data=df, 
+        x=target_severity_mans, y=p, order=order_severity_mans,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=df, x=target_severity_mans, y=p, 
+        order=order_severity_mans, hue=target_severity_mans, alpha=0.3, 
+        palette=list(colors_severity_mans.values()), hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_mans.values()))
+
+    ax.set_ylabel(f"$Log_2$ abundance {meta_table.loc[p, 'Gene Name']}")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label, rotation=0)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.axvline(0.5, c="k", ls="--")
+
+    ax.set_title("$p_{kruskal, subspecies}$: "+  f"{results_pcr_mp.loc[p, 'p_kruskal_subspecies']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "plots", "boxplots", "deuxVSperstans", f"{meta_table.loc[p, 'Gene Name']}_{p}_{'signif' if results_pcr_mp.loc[p, 'qfdr_kruskal_subspecies']<0.05 else ''}.png"), dpi=600)
+    plt.close()
+    # break
+```
+
+### Correlation with mpmf counts per subspecies
+
+```{python}
+data_mans_mp = df[df["mp_mf"]>0]
+data_mans_mp["log2_mp_mf"] = np.log2(data_mans_mp["log2_mp_mf"]+1)
+
+
+colors_severity_pcr = {
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MDandMP": sns.color_palette("Oranges", n_colors=10)[6],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+
+for p in meta_table.index:
+
+    p_gene = meta_table.loc[p, "Gene Name"]
+
+    fig, axs = plt.subplots(1,3, figsize=(12,4), sharex=True, sharey=True)
+
+    for i, s in enumerate(colors_severity_pcr.keys()):
+        ax = axs[i]
+        df_s = data_mans_mp[data_mans_mp["severity_pcr"]==s]
+        sns.scatterplot(
+            ax=ax,
+            data=df_s, 
+            x="log2_mp_mf", y=p,
+            color=colors_severity_pcr[s], alpha=0.7,
+            legend=False, edgecolor="k", linewidth=1)
+        
+        df_s_p = df_s.copy()
+        df_s_p.dropna(subset=p, inplace=True)
+
+        # a, b = np.polyfit(df_s_p["log2_mp_mf"], df_s_p[p], deg=1)
+        # y_p_fit = a * df_s_p["log2_mp_mf"] + b 
+        # ax.plot(df_s_p["log2_mp_mf"], y_p_fit, c="k", zorder=0)
+
+        ax.set_ylabel(f"$Log_2$ abundance {p_gene}")
+        ax.set_xlabel(f"$Log_2$ Mansonella parasites per mL")
+        # ax.spines[['right', 'top']].set_visible(False)
+        ax.spines['left'].set_linewidth(2)  # Left border thickness
+        ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+        ax.spines['right'].set_linewidth(2) # Bottom border thickness
+        ax.spines['top'].set_linewidth(2) # Bottom border thickness
+        # Set y-axis ticks to one decimal place
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        ax.set_title("r: "+  f"{results_pcr_mp.loc[p, f'r_srho_Mmf_{s}']:.2f}, "+"q: "+  f"{results_pcr_mp.loc[p, f'r_srho_Mmf_{s}']:.2e}", fontsize=11)
+
+        
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    # plt.show()
+    
+    plt.savefig(
+        os.path.join("results", "mansonella", "plots", "parasite_count_by_subspecies",  f'{p_gene}.png'), dpi=600)
+    plt.close()
+    # break
+```
+
+
+```{python}
+data_mans_mp = df[df["mp_mf"]>0]
+data_mans_mp["log2_mp_mf"] = np.log2(data_mans_mp["log2_mp_mf"]+1)
+
+target_severity_mans = "severity_pcr"
+order_severity_mans = ['MD', 'MDandMP', 'MP']
+order_severity_mans_label = ['MD', 'MD+MP', 'MP']
+
+colors_severity_pcr = {
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MDandMP": sns.color_palette("Oranges", n_colors=10)[6],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+fig, ax = plt.subplots(1,1, figsize=(3,3))
+sns.boxplot(
+    data=df, 
+    x=target_severity_mans, y="mp_mf", order=order_severity_mans,
+    fliersize=0, fill=False, color="k",
+    legend=False,
+    capprops = dict(linewidth=1.5),
+    boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+    whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+sns.stripplot(
+    data=df, x=target_severity_mans, y="mp_mf", 
+    order=order_severity_mans, hue=target_severity_mans, alpha=0.3, 
+    palette=list(colors_severity_pcr.values()), hue_order=order_severity_mans, 
+    edgecolor=list(colors_severity_pcr.values()))
+
+ax.set_ylabel(f"Mansonella parasites per mL")
+ax.set_xlabel(f"", fontweight="bold")
+ax.set_yticklabels(ax.get_yticklabels())
+ax.set_xticklabels(order_severity_mans_label, rotation=0)
+
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+# ax.axvline(0.5, c="k", ls="--")
+```
+
+```{python}
+data_mans_mp = df[df["mp_mf"]>0]
+data_mans_mp["log2_mp_mf"] = np.log2(data_mans_mp["log2_mp_mf"]+1)
+
+target_severity_mans = "severity_pcr"
+order_severity_mans = ['MD', 'MDandMP', 'MP']
+order_severity_mans_label = ['MD', 'MD+MP', 'MP']
+
+colors_severity_pcr = {
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MDandMP": sns.color_palette("Oranges", n_colors=10)[6],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+fig, ax = plt.subplots(1,1, figsize=(3,3))
+sns.boxplot(
+    data=df, 
+    x=target_severity_mans, y="log2_mp_mf", order=order_severity_mans,
+    fliersize=0, fill=False, color="k",
+    legend=False,
+    capprops = dict(linewidth=1.5),
+    boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+    whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+sns.stripplot(
+    data=df, x=target_severity_mans, y="log2_mp_mf", 
+    order=order_severity_mans, hue=target_severity_mans, alpha=0.3, 
+    palette=list(colors_severity_pcr.values()), hue_order=order_severity_mans, 
+    edgecolor=list(colors_severity_pcr.values()))
+
+ax.set_ylabel(f"$Log_2$ Mansonella parasites per mL")
+ax.set_xlabel(f"", fontweight="bold")
+ax.set_yticklabels(ax.get_yticklabels())
+ax.set_xticklabels(order_severity_mans_label, rotation=0)
+
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+# ax.axvline(0.5, c="k", ls="--")
+```
+
+## Matching
+
+MP 10 Samples:
+4 males, 6 females
+
+Pairs (Loa-Ids):
+MP          MD          CTRL
+LOA-0358    LOA-0053    LOA-1163        Men
+LOA-0913    LOA-0497
+LOA-0633    LOA-0136
+LOA-0665*   LOA-0329
+LOA-0680    LOA-0836            Women
+LOA-0969    LOA-0588
+LOA-0379    LOA-0547
+LOA-0857    LOA-0587
+LOA-0713    LOA-0427
+LOA-1108*   LOA-0744*
+
+*Only age group known >65 years
+
+```{python}
+df[(df["severity_pcr"]=="MP") & (df["sex"]==1)][["Patient ID", "age", "sex", "mp_mf"]].sort_values(by=["age", "mp_mf"])
+```
+
+```{python}
+df[(df["severity_pcr"]=="MD") & (df["sex"]==0)][["Patient ID", "age", "sex", "mp_mf"]].sort_values(by=["age", "mp_mf"])
+```
+
+
+```{python}
+df[(df["severity_pcr"]=="negative") & (df["sex"]==1)][["Patient ID", "age", "sex", "mp_mf", "P01034"]].sort_values(by=["age", "mp_mf"])
+
+```
+
+```{python}
+# matched pats by age, sex and mp_mf
+matched_pats = [
+    "LOA-0358", "LOA-0913", "LOA-0633", "LOA-0665", # MP 
+    "LOA-0680", "LOA-0969", "LOA-0379", "LOA-0857", "LOA-0713", "LOA-1108",
+    "LOA-0053", "LOA-0497", "LOA-0136", "LOA-0329", # MD
+    "LOA-0836", "LOA-0588", "LOA-0547", "LOA-0587", "LOA-0427", "LOA-0744",
+    "LOA-1163", "LOA-0801", "LOA-1160", "LOA-1009", # CTRL
+    "LOA-1037", "LOA-0701", "LOA-1216", "LOA-1210", "LOA-1098", "LOA-0810"  
+    ]
+
+df_matched = df[df["Patient ID"].isin(matched_pats)]
+```
+
+```{python}
+# import measurement meta data
+ms_meta_loa = pd.read_excel(
+    os.path.join(
+        "data", "meta_files_measurement", "20230719_AF_50-0127_metadata_Loaloa.xlsx"
+    ), index_col="sample_id"
+) 
+
+```
+
+```{python}
+
+df_matched_export = df_matched[["Patient ID", "severity_pcr", "sex", "age", "mp_mf", "filename"]].set_index("filename")
+df_matched_export.sort_values(by=["severity_pcr", "sex", "age"], inplace=True) 
+
+
+df_matched_export = df_matched_export.merge(
+    ms_meta_loa[['Analysis.Plate', 'Analysis.Row', 'Analysis.Column',
+       'Study', 'Analysis.Plate96', 'Analysis.Row96', 'Analysis.Column96']], 
+    left_index=True, right_index=True, how="left")
+
+df_matched_export.columns = ['Patient ID', 'severity_pcr', 'sex', 'age', 'mp_mf', 'Analysis.Plate384',
+       'Analysis.Row384', 'Analysis.Column384', 'Study', 'Analysis.Plate96',
+       'Analysis.Row96', 'Analysis.Column96']
+
+df_matched_export = df_matched_export[[
+    "Study", 
+    'Analysis.Plate96', 'Analysis.Row96', 'Analysis.Column96',
+    'Analysis.Plate384','Analysis.Row384', 'Analysis.Column384',
+    'Patient ID', 'severity_pcr', 'sex', 'age', 'mp_mf'
+]]
+
+df_matched_export.to_csv(
+    os.path.join(
+        "results", "mansonella", "metabolomics", "20260306_sample_selection_mansonella.csv"
+    ), index=False
+)
+```
+
+### Analysis
+
+#### Pre Analysis Kidney Markers Metabolomics Subset
+
+```{python}
+kidney_marker = ["P01034", "Q15848", "P61769", "P25311"]
+p_values_kidney = [mannwhitneyu(
+    df_matched[df_matched["severity_pcr"]=="MP"][p],
+    df_matched[df_matched["severity_pcr"]=="MD"][p],
+    nan_policy="omit"
+)[1] for p in kidney_marker]
+```
+
+
+```{python}
+colors_severity_matched = {
+    "negative": "tab:blue",
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+target_severity_mans = "severity_pcr"
+order_severity_mans = ['negative', 'MD','MP']
+order_severity_mans_label = ['CTRL', "MD" ,'MP']
+
+for p, pval in zip(kidney_marker, p_values_kidney):    
+
+    fig, ax = plt.subplots(1,1, figsize=(3,3))
+    sns.boxplot(
+        data=df_matched, 
+        x=target_severity_mans, y=p, order=order_severity_mans,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=df_matched, x=target_severity_mans, y=p, 
+        order=order_severity_mans, hue=target_severity_mans, alpha=0.7, 
+        palette=colors_severity_matched, hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_matched.values()))
+
+    ax.set_ylabel(f"$Log_2$ abundance {meta_table.loc[p, 'Gene Name']}")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label, rotation=0)
+    ax.set_title("$p_{u, MPvsMD}$: "+  f"{pval:.2e}", fontsize=11)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+    # ax.set_title("$q_{kruskal, infected}$: "+  f"{results_severity.loc[p, 'p_kruskal_severity']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "metabolomics", f"{meta_table.loc[p, 'Gene Name']}_{p}_{'signif' if results_pcr_mp.loc[p, 'p_kruskal_subspecies']<0.05 else ''}.png"), dpi=600)
+    plt.close()
+```
+
+
+# Metabolomics
+
+```{python}
+metabolomics_data_path = os.path.join(
+    "results", "mansonella", "metabolomics", "data"
+)
+
+metabolomics_filtered = pd.read_csv(
+    os.path.join(
+        # metabolomics_data_path, "20260331_LoaLoa_test_metabAssay_calibrMix-v3-FW_ISTD.csv"
+        metabolomics_data_path, "filtered_ADMA_Creatinine_UricAcid_Urea_calcConc.csv"
+    ), index_col =  0
+).T
+# metabolomics_filtered = metabolomics_filtered[metabolomics_filtered.index.str.startswith("Loa")]
+
+
+# Fiona hat einen kleinen umrechnungsfehler in der Urea Konzentration gemacht
+metabolomics_filtered["Urea"] = metabolomics_filtered["Urea"]/10
+
+metabolites_sel = ["ADMA", "Creatinine", "Urea", 'Uric acid']
+```
+
+```{python}
+sample_names = metabolomics_filtered.index
+sample_names_clear = []
+sample_type_clear = []
+
+for i, s in enumerate(sample_names):
+    if "CAL_1-" in s:
+        x = s.split("_")[2][-1]
+        y = s.split("_")[3][-1]
+        sample_names_clear.append(
+            f'CAL 1:{s.split("_")[1].split("-")[1]}'
+        )
+        sample_type_clear.append("CAL METABOLITE")
+    elif "blank" in s:
+        sample_names_clear.append(
+            s
+        )
+        sample_type_clear.append("BLANK")
+    elif "negcontrol" in s:
+        sample_names_clear.append('negcontrol_h20_'+s[-1])
+        sample_type_clear.append("NEGATIVE")
+    elif "CAL_L" in s:
+        sample_names_clear.append("CAL_" + s.split("_")[1])
+        sample_type_clear.append("CAL CHROMSOLV")
+    elif "CAL_u" in s:
+        sample_names_clear.append(s)
+        sample_type_clear.append("CAL U")
+    elif "Loa-Pool" in s:
+        sample_names_clear.append(f'LOA POOL_{s.split("_")[2][-1]}')
+        sample_type_clear.append("LOA POOL")
+    elif "Loaloa" in s and "Pool" not in s:
+        sample_names_clear.append(s.split("_")[2])
+        sample_type_clear.append("LOA SAMPLE")
+    elif "GCKD" in s:
+        sample_names_clear.append(f'GCKD POOL {s.split("_")[2][-1]}')
+        sample_type_clear.append("GCKD POOL")
+    elif "50-0131" in s:
+        sample_names_clear.append(f'VACC POOL {s.split("_")[2][-1]}')
+        sample_type_clear.append("VACC POOL")
+    else:
+        print(s)
+
+metabolomics_filtered["sample_type"] = sample_type_clear
+metabolomics_filtered["sample_names"] = sample_names_clear
+
+```
+
+```{python}
+df_metab_bio = df[["Patient ID", "mp_mf", "severity_pcr", "age", "sex"]].merge(
+    metabolomics_filtered, left_on="Patient ID", right_on="sample_names", how="right"
+)
+
+# Umrechnungsfaktoren µmol/L → mg/dL (Urea: mmol/L → mg/dL)
+conversion = {
+    "Creatinine": 0.0113,
+    "Uric acid":  0.0168,
+    "Urea":       0.006006,   
+}
+
+for marker, factor in conversion.items():
+    df_metab_bio[f"{marker}_mg_dl"] = df_metab_bio[marker] * factor
+
+
+df_metab_bio["Patient ID"].fillna(df_metab_bio["sample_names"], inplace=True)
+df_metab_bio["severity_pcr"].fillna(df_metab_bio["sample_type"], inplace=True)
+
+df_metab_bio["log2_mpmf"] = np.log2(df_metab_bio["mp_mf"]+1)
+```
+
+```{python}
+# Calculate egfr
+df_metab_bio_samples = df_metab_bio[df_metab_bio["sample_type"]=="LOA SAMPLE"]
+df_metab_bio_samples["age"].fillna(65, inplace=True)
+df_metab_bio_samples["sex_m"] = df_metab_bio_samples["sex"].replace({1:"M", 0:"F"})
+
+df_metab_bio_samples = egfr_ckd_epi_2021_df(df_metab_bio_samples, scr_col="Creatinine_mg_dl")
+```
+
+```{python}
+df_subset_metabolomics = df.copy()
+df_subset_metabolomics.set_index("Sample ID", inplace=True)
+df_subset_metabolomics = df_subset_metabolomics.loc[df_metab_bio_samples.index]
+df_metab_bio_samples.merge(df[["Sample ID"] + list(meta_table.index)], left_on="Patient ID", right_on="Sample ID", how="left")
+```
+
+
+```{python}
+# Statistics Metabolomics
+
+metabolites_sel = ["ADMA", "Creatinine", "Urea", 'Uric acid']
+
+colors_severity_matched = {
+    "negative": "tab:blue",
+    "MD": sns.color_palette("Oranges", n_colors=10)[3],
+    "MP": sns.color_palette("Oranges", n_colors=10)[9],
+}
+
+target_severity_mans = "severity_pcr"
+order_severity_mans = ['negative', 'MD','MP']
+order_severity_mans_label = ['CTRL', "MD" ,'MP']
+
+# [kruskal(*[df_metab_long[(df_metab_long["metabolite"]==m) & (df_metab_long["severity_pcr"]==g)]["Calc. Conc."] for g in order_severity_mans]) for m in metabolites]
+
+df_stats_metabolites = pd.DataFrame(index=metabolites_sel)
+
+
+for m in metabolites_sel[::-1]:
+
+    df_metab_bio.loc[df_metab_bio["sample_type"]=="VACC POOL", "severity_pcr"] = "Vacc Pool"
+    df_metab_bio.loc[df_metab_bio["sample_type"]=="GCKD POOL", "severity_pcr"] = "GCKD Pool"
+
+    if len(pd.concat([df_metab_bio[df_metab_bio["severity_pcr"]==g][m] for g in order_severity_mans]).unique()) > 1:
+
+        df_metab_long_pool = df_metab_bio[
+            df_metab_bio["sample_type"]=="LOA POOL"]
+        df_metab_long_sample = df_metab_bio[
+            df_metab_bio["sample_type"]=="LOA SAMPLE"]
+        if df_metab_long_pool.shape[0] >4:
+            cv_m = (df_metab_long_pool[m].std()/df_metab_long_pool[m].mean())*100
+            df_stats_metabolites.loc[m, "CV_POOL_CONC"] = cv_m
+            cv_study = (df_metab_long_sample[m].std()/df_metab_long_sample[m].mean())*100
+            df_stats_metabolites.loc[m, "CV_STUDY_CONC"] = cv_study
+            
+
+    df_metab_bio[f"log2_{m}"] = np.log2(df_metab_bio[m]+1)
+
+    df_stats_metabolites.loc[m, "N_CTRL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="negative"].shape[0]
+    df_stats_metabolites.loc[m, "N_MD"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"].shape[0]
+    df_stats_metabolites.loc[m, "N_MP"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"].shape[0]
+
+    df_stats_metabolites.loc[m, "Med_Conc_POOL_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="LOA POOL"][m].median()
+    df_stats_metabolites.loc[m, "Med_Conc_CTRL_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m].median()
+    df_stats_metabolites.loc[m, "Med_Conc_MD_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][m].median()
+    df_stats_metabolites.loc[m, "Med_Conc_MP_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][m].median()
+    df_stats_metabolites.loc[m, "Med_Conc_VaccPool_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="Vacc Pool"][m].median()
+    df_stats_metabolites.loc[m, "Med_Conc_GCKDPool_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="GCKD Pool"][m].median()
+
+    df_stats_metabolites.loc[m, "diff_MD_CTRL_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][m].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m].median()
+    df_stats_metabolites.loc[m, "diff_MP_CTRL_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][m].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m].median()
+    df_stats_metabolites.loc[m, "diff_MP_MD_µmol_L"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][m].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][m].median()
+
+    if m != "ADMA":
+
+        df_stats_metabolites.loc[m, "Med_Conc_POOL_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="LOA POOL"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "Med_Conc_CTRL_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "Med_Conc_MD_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "Med_Conc_MP_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "Med_Conc_VaccPool_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="Vacc Pool"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "Med_Conc_GCKDPool_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="GCKD Pool"][f"{m}_mg_dl"].median()
+
+        df_stats_metabolites.loc[m, "diff_MD_CTRL_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][f"{m}_mg_dl"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "diff_MP_CTRL_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][f"{m}_mg_dl"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][f"{m}_mg_dl"].median()
+        df_stats_metabolites.loc[m, "diff_MP_MD_mg_dL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][f"{m}_mg_dl"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][f"{m}_mg_dl"].median()
+    
+    df_stats_metabolites.loc[m, "log2FC_MD_CTRL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][f"log2_{m}"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][f"log2_{m}"].median()
+    df_stats_metabolites.loc[m, "log2FC_MP_CTRL"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][f"log2_{m}"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][f"log2_{m}"].median()
+    df_stats_metabolites.loc[m, "log2FC_MP_MD"] = df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][f"log2_{m}"].median()- df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][f"log2_{m}"].median()
+
+    counts = df_metab_bio["severity_pcr"].value_counts()
+    if counts[counts>5].shape[0]==3:
+        df_stats_metabolites.loc[m, "p_kruskal"] = kruskal(*[df_metab_bio[df_metab_bio["severity_pcr"]==g][m] for g in order_severity_mans])[1]
+        df_stats_metabolites.loc[m, "p_u_MD_CTRL"] = mannwhitneyu(
+            df_metab_bio[df_metab_bio["severity_pcr"]=="MD"][m],
+            df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m])[1]
+        df_stats_metabolites.loc[m, "p_u_MP_CTRL"] = mannwhitneyu(
+            df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][m],
+            df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m])[1]
+        df_stats_metabolites.loc[m, "p_u_MP_MD"] = mannwhitneyu(
+            df_metab_bio[df_metab_bio["severity_pcr"]=="MP"][m],
+            df_metab_bio[df_metab_bio["severity_pcr"]=="negative"][m])[1]
+
+        df_metab_bio_inf = df_metab_bio[df_metab_bio["severity_pcr"].isin(["MD", "MP"])]
+
+        df_stats_metabolites.loc[
+        m, "srho_mpmf_conc_r"] = spearmanr(df_metab_bio_inf[m], df_metab_bio_inf["mp_mf"], nan_policy="omit")[0]
+        df_stats_metabolites.loc[
+        m, "srho_mpmf_conc_p"] = spearmanr(df_metab_bio[m], df_metab_bio["mp_mf"], nan_policy="omit")[1]
+
+df_stats_metabolites.to_csv(
+    os.path.join(
+        "results", "mansonella", "metabolomics", "05062026_stats_metabolomics.csv"
+    )
+)
+```
+
+
+```{python}
+for m in metabolites_sel:    
+
+    order_severity_mans_pools = order_severity_mans + ["Vacc Pool", "GCKD Pool"]
+    order_severity_mans_label_pools = order_severity_mans_label + ["Vacc Pool", "GCKD Pool"]
+
+    colors_severity_matched_pools = {
+        'negative': 'tab:blue',
+        'MD': (0.9921568627450981, 0.6933333333333334, 0.4373702422145329),
+        'MP': (0.6083967704728951, 0.19538638985005768, 0.012856593617839291),
+        "Vacc Pool":"tab:gray", 
+        "GCKD Pool":"tab:gray"}
+
+    if m == "ADMA":
+        target = m
+    else:
+        target = f"{m}_mg_dl"
+
+    fig, ax = plt.subplots(1,1, figsize=(5,3))
+    sns.boxplot(
+        data=df_metab_bio, 
+        x=target_severity_mans, y=target, order=order_severity_mans_pools,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=df_metab_bio, x=target_severity_mans, y=target, 
+        order=order_severity_mans_pools, hue=target_severity_mans, alpha=0.7, 
+        palette=colors_severity_matched_pools, hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_matched_pools.values()))
+
+    if m == "ADMA":
+        ax.set_ylabel(f"{m} (µmol/L)")
+    else:
+        ax.set_ylabel(f"{m} (mg/dL)")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label_pools, rotation=0)
+    # ax.set_title("$p_{u, MPvsMD}$: "+  f"{pval:.2e}", fontsize=11)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.grid()
+    ax.set_title("$q_{kruskal, Mansonella}$: "+  f"{df_stats_metabolites.loc[m, 'p_kruskal']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "metabolomics", "boxplots_corrected",  f"{m}_conc.png"), dpi=400)
+    # plt.close()
+    # break
+```
+```{python}
+for m in metabolites_sel:    
+
+    order_severity_mans_pools = order_severity_mans
+    order_severity_mans_label_pools = order_severity_mans_label
+
+    colors_severity_matched_pools = {
+        'negative': 'tab:blue',
+        'MD': (0.9921568627450981, 0.6933333333333334, 0.4373702422145329),
+        'MP': (0.6083967704728951, 0.19538638985005768, 0.012856593617839291),
+        "Vacc Pool":"tab:gray", 
+        "GCKD Pool":"tab:gray"}
+
+    if m == "ADMA":
+        target = m
+    else:
+        target = f"{m}_mg_dl"
+
+    fig, ax = plt.subplots(1,1, figsize=(3,3))
+    sns.boxplot(
+        data=df_metab_bio, 
+        x=target_severity_mans, y=target, order=order_severity_mans_pools,
+        fliersize=0, fill=False, color="k",
+        legend=False,
+        capprops = dict(linewidth=1.5),
+        boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+        whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+    sns.stripplot(
+        data=df_metab_bio, x=target_severity_mans, y=target, 
+        order=order_severity_mans_pools, hue=target_severity_mans, alpha=0.7, 
+        palette=colors_severity_matched_pools, hue_order=order_severity_mans, 
+        edgecolor=list(colors_severity_matched_pools.values()))
+
+    if m == "ADMA":
+        ax.set_ylabel(f"{m} (µmol/L)")
+    else:
+        ax.set_ylabel(f"{m} (mg/dL)")
+    ax.set_xlabel(f"", fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels())
+    ax.set_xticklabels(order_severity_mans_label_pools, rotation=0)
+    # ax.set_title("$p_{u, MPvsMD}$: "+  f"{pval:.2e}", fontsize=11)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.grid()
+    ax.set_title("$q_{kruskal, Mansonella}$: "+  f"{df_stats_metabolites.loc[m, 'p_kruskal']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "metabolomics", "boxplots_corrected",  f"{m}_conc_bio.png"), dpi=400)
+    # plt.close()
+    # break
+```
+
+```{python}
+# Boxplot eGFR 
+
+order_severity_mans_pools = order_severity_mans
+order_severity_mans_label_pools = order_severity_mans_label
+
+colors_severity_matched_pools = {
+    'negative': 'tab:blue',
+    'MD': (0.9921568627450981, 0.6933333333333334, 0.4373702422145329),
+    'MP': (0.6083967704728951, 0.19538638985005768, 0.012856593617839291),
+    # "Vacc Pool":"tab:gray", 
+    # "GCKD Pool":"tab:gray"
+    }
+
+m = "eGFR"
+target = m
+ 
+fig, ax = plt.subplots(1,1, figsize=(3,3))
+sns.boxplot(
+    data=df_metab_bio_samples, 
+    x=target_severity_mans, y=target, order=order_severity_mans_pools,
+    fliersize=0, fill=False, color="k",
+    legend=False,
+    capprops = dict(linewidth=1.5),
+    boxprops = dict(linewidth=1.5), medianprops = dict(linewidth=3, color="k"), 
+    whiskerprops = dict(linestyle='--', color='black', linewidth=1.5))
+sns.stripplot(
+    data=df_metab_bio_samples, x=target_severity_mans, y=target, 
+    order=order_severity_mans_pools, hue=target_severity_mans, alpha=0.7, 
+    palette=colors_severity_matched_pools, hue_order=order_severity_mans, 
+    edgecolor=list(colors_severity_matched_pools.values()))
+
+
+ax.set_ylabel(f"eGFR (mL/min/1.73 m²)")
+ax.set_xlabel(f"", fontweight="bold")
+ax.set_yticklabels(ax.get_yticklabels())
+ax.set_xticklabels(order_severity_mans_label_pools, rotation=0)
+# ax.set_title("$p_{u, MPvsMD}$: "+  f"{pval:.2e}", fontsize=11)
+
+ax.spines['left'].set_linewidth(2)  # Left border thickness
+ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+ax.spines['right'].set_linewidth(2) # Bottom border thickness
+ax.spines['top'].set_linewidth(2) # Bottom border thickness
+# Set y-axis ticks to one decimal place
+ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+ax.grid()
+# ax.set_title("$q_{kruskal, Mansonella}$: "+  f"{df_stats_metabolites.loc[m, 'p_kruskal']:.2e}", fontsize=11)
+plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+plt.tight_layout()
+plt.savefig(
+    os.path.join("results", "mansonella", "metabolomics", "boxplots_corrected",  f"{m}_conc_bio.png"), dpi=400)
+# plt.close()
+    # break
+```
+
+Correlation mp_mf and metabolites
+
+```{python}
+# df_metabolomics_bio_inf = df_metabolomics_bio[
+#     df_metabolomics_bio["severity_pcr"]!="negative"]
+# df_metabolomics_bio_inf["log2_mp_mf"] = np.log2(
+#     df_metabolomics_bio_inf["mp_mf"]
+# )
+target_severity_mans = "severity_pcr"
+
+for m in metabolites_sel:   
+
+    df_metab_long_sample = df_metab_bio[
+            df_metab_bio["sample_type"]=="LOA SAMPLE"]
+    
+    df_metab_long_sample = df_metab_long_sample[df_metab_long_sample["severity_pcr"].isin(["MD", "MP"])]
+
+    if m == "ADMA":
+        df_metab_long_sample["log10_conc"] = np.log10(df_metab_long_sample[m])
+    else:
+        df_metab_long_sample["log10_conc"] = np.log10(df_metab_long_sample[f"{m}_mg_dl"])
+
+    
+
+    fig, ax = plt.subplots(1,1, figsize=(4,4))
+    sns.scatterplot(
+        data=df_metab_long_sample, x="log2_mpmf", y="log10_conc", 
+        hue=target_severity_mans, alpha=0.7, 
+        palette=colors_severity_matched, 
+        legend=True, edgecolor="k", linewidth=1
+        # hue_order=order_severity_mans, 
+        # edgecolor=list(colors_severity_matched.values())
+        )
+
+    a, b = np.polyfit(df_metab_long_sample["log2_mpmf"], df_metab_long_sample["log10_conc"], deg=1)
+    y_p_fit = a * df_metab_long_sample["log2_mpmf"] + b 
+    ax.plot(df_metab_long_sample["log2_mpmf"], y_p_fit, c="k", zorder=0)
+
+    r = df_stats_metabolites.loc[m, "srho_mpmf_conc_r"]
+    pval = df_stats_metabolites.loc[m, "srho_mpmf_conc_p"]
+
+    if m == "ADMA":
+        ax.set_ylabel("$Log_{10}$"+f" {m} µmol/L")
+    else:
+        ax.set_ylabel("$Log_{10}$"+f" {m} mg/dL")
+
+    # ax.set_ylabel(m)
+    ax.set_xlabel("$Log_2$ Parasites per mL")
+
+    ax.set_title(f"r: {r:.2f}, p: {pval:.2e}", fontsize=11)
+    ax.legend(title="Subspecies")
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    # ax.get_legend().set_title("")
+    # ax.set_title("$q_{kruskal, infected}$: "+  f"{results_severity.loc[p, 'p_kruskal_severity']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "metabolomics", "correlation_corrected",  f"{r:.2f}_MPMFvs{m}.png"), dpi=400)
+    # plt.close()
+            
+
+```
+
+
+```{python}
+for m in metabolites_sel: 
+
+    df_metab_long_sample = df_metab_bio[
+            df_metab_bio["sample_type"]=="LOA SAMPLE"]
+
+    fig, ax = plt.subplots(1,1, figsize=(4,4))
+    sns.scatterplot(
+        hue=target_severity_mans, alpha=0.7, 
+        palette=colors_severity_matched, 
+        legend=True,
+        # hue_order=order_severity_mans, 
+        # edgecolor=list(colors_severity_matched.values())
+        )
+
+
+
+    ax.set_ylabel(f"Calc. Conc. {m}")
+    ax.set_xlabel(f"$Log_2$ abundance {meta_table.loc[p, 'Gene Name']}")
+
+    ax.set_title(f"r: {r:.2f}, p: {pval:.2e}", fontsize=11)
+
+    ax.spines['left'].set_linewidth(2)  # Left border thickness
+    ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
+    ax.spines['right'].set_linewidth(2) # Bottom border thickness
+    ax.spines['top'].set_linewidth(2) # Bottom border thickness
+    # Set y-axis ticks to one decimal place
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    ax.get_legend().set_title("")
+    # ax.set_title("$q_{kruskal, infected}$: "+  f"{results_severity.loc[p, 'p_kruskal_severity']:.2e}", fontsize=11)
+    plt.tick_params(axis='both', which='major', width=3)  # Adjust width of major ticks
+    plt.tick_params(axis='both', which='minor', width=3)  # Adjust width of minor ticks
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join("results", "mansonella", "metabolomics", "metabolites_mpmf_correlation",  f"{m}vs MPMF.png"), dpi=400)
+    plt.close()
+    
+    # break
+```
+
+
+# Supplement
+
+```{python}
+prot_singnif_MvsCTRL = results_severity[(results_severity["qfdr_u_MvsCTRL"]<0.01) & (~results_severity["MedFC_MvsCTRL"].between(-0.2, 0.2))].sort_values(by="Gene Name").index
+
+
+path_boxplots_MvsCTRL = "results/mansonella/plots/boxplots/severity_mvsctrl"
+filenames = os.listdir(path_boxplots_MvsCTRL)
+
+path_latex_long_MvsCTRL = os.path.join("results", "mansonella", "manuscript", "figures_supp", "MvsCTRL")
+os.makedirs(path_latex_long_MvsCTRL, exist_ok=True)
+
+counter=0
+test = []
+for p in prot_singnif_MvsCTRL:
+    for f in filenames:
+        if p in f:
+            if p not in test:
+                shutil.copy(
+                    os.path.join(path_boxplots_MvsCTRL, f), 
+                    os.path.join(path_latex_long_MvsCTRL, f"{counter}.png"))
+                counter += 1
+            test.append(p)
+
+            print(p)
+    
+for file in os.listdir(path_latex_long_MvsCTRL):
+        
+    img = Image.open(os.path.join(path_latex_long_MvsCTRL, file)).convert("RGB")
+    new_size = (img.width // 10, img.height // 10)
+    img_resized = img.resize(new_size, Image.LANCZOS)
+    img_resized.save(
+        os.path.join(path_latex_long_MvsCTRL, file), dpi=(72, 72), optimize=True)
+```
+
+```{python}
+prot_singnif_MvsLL = results_severity[(results_severity["p_dunn_MvsLL"]<0.05) |  (results_severity["p_dunn_MvsLL_M"]<0.05) |  (results_severity["p_dunn_LLvsLL_M"]<0.05)].sort_values(by="Gene Name").index
+
+
+path_boxplots_MvsLL = "results/mansonella/plots/boxplots/severity"
+filenames = os.listdir(path_boxplots_MvsLL)
+
+filenames = os.listdir(path_boxplots_MvsLL)
+
+path_latex_long_MvsLL = os.path.join("results", "mansonella", "manuscript", "figures_supp", "MvsLL")
+os.makedirs(path_latex_long_MvsLL, exist_ok=True)
+
+counter=0
+test = []
+for p in prot_singnif_MvsLL:
+    for f in filenames:
+        if p in f:
+            if p not in test:
+                shutil.copy(
+                    os.path.join(path_boxplots_MvsLL, f), 
+                    os.path.join(path_latex_long_MvsLL, f"{counter}.png"))
+                counter += 1
+            test.append(p)
+
+            print(p)
+    
+for file in os.listdir(path_latex_long_MvsLL):
+        
+    img = Image.open(os.path.join(path_latex_long_MvsLL, file)).convert("RGB")
+    new_size = (img.width // 10, img.height // 10)
+    img_resized = img.resize(new_size, Image.LANCZOS)
+    img_resized.save(
+        os.path.join(path_latex_long_MvsLL, file), dpi=(72, 72), optimize=True)
+```
+
+```{python}
+prot_singnif_subspecies = results_pcr_mp[(results_pcr_mp["p_u_MPvsMD"]<0.05) & (~results_pcr_mp["MedFC_MPvsMD"].between(-0.2, 0.2))].sort_values(by="Gene Name").index
+```
+
+
+```{python}
+
+path_boxplots_subspecies = "results/mansonella/plots/boxplots/deuxVSperstans"
+filenames = os.listdir(path_boxplots_subspecies)
+
+path_latex_long_subspecies = os.path.join("results", "mansonella", "manuscript", "figures_supp", "subspecies")
+os.makedirs(path_latex_long_subspecies, exist_ok=True)
+
+counter=0
+test = []
+for p in prot_singnif_subspecies:
+    for f in filenames:
+        if p in f:
+            if p not in test:
+                shutil.copy(
+                    os.path.join(path_boxplots_subspecies, f), 
+                    os.path.join(path_latex_long_subspecies, f"{counter}.png"))
+                counter += 1
+            test.append(p)
+
+            print(p)
+    
+for file in os.listdir(path_latex_long_subspecies):
+        
+    img = Image.open(os.path.join(path_latex_long_subspecies, file)).convert("RGB")
+    new_size = (img.width // 10, img.height // 10)
+    img_resized = img.resize(new_size, Image.LANCZOS)
+    img_resized.save(
+        os.path.join(path_latex_long_subspecies, file), dpi=(72, 72), optimize=True)
+```
