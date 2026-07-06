@@ -32,8 +32,7 @@ and with both (EWMF). Furthermore, we explore the associations between measured
 proteins and reported symptoms in LN and EW patients. 
 Finally, we train machine learning models to distinguish 
 LN from INF, MF and EW. An overview of the study design is given here 
-@Veletzky2022. An extensive introduction into Loa loa infections (or loiasis) 
-can be found here @Ramharter2024.
+@Veletzky2022. An extensive introduction into Loa loa infections (or loiasis) can be found here @Ramharter2024.
 
 ## Libraries
 
@@ -55,19 +54,25 @@ from itertools import combinations, product
 
 # plotting
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import seaborn as sns
 from adjustText import adjust_text
+from matplotlib.colors import to_hex
 
 # ml & statistics
 import joblib 
 from statsmodels.stats.multitest import multipletests
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, LeaveOneOut ,StratifiedKFold
-from sklearn.feature_selection import mutual_info_classif, RFECV
-from sklearn.metrics import accuracy_score, roc_curve, roc_auc_score, confusion_matrix
-from sklearn.preprocessing import MinMaxScaler
-from scipy.stats import spearmanr
-from scipy.integrate import trapezoid
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+
+from sklearn.feature_selection import RFECV, SelectKBest
+from sklearn.impute import KNNImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import LeaveOneOut,StratifiedKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from scikit_posthocs import posthoc_dunn
+from sklearn.svm import SVC
+
 from itables import show
 RANDOM_STATE = 42
 ```
@@ -112,8 +117,10 @@ def plot_volcano_limma(
     ax.axhline(1.3, c="gray", ls="--")
     ax.axvline(fc, c="gray", ls="--")
     ax.axvline(-fc, c="gray", ls="--")
-    ax.set_xlim([-0.5, 1.3])
-    ax.set_ylim([-0.5, 16])
+    ax.set_xlim([-0.5, 0.8])
+    # ax.set_xlim([-0.5, 1.3])
+    # ax.set_ylim([-0.5, 16])
+    ax.set_ylim([-0.5, 4])
     ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold", fontsize=9)
     ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", fontsize=9)
     plt.grid()
@@ -235,8 +242,8 @@ def plot_fc_diff(limma_x,limma_y, xlabel, ylabel, save_path):
     ax.set_yticklabels(ax.get_yticklabels(), fontdict={"weight":"bold"})
     # Plot IGHG4 seperately to not skew the visualization
     ax.text(0.51, 0.82, "IGHG4 [x: 1.05, y: 0.28]", c="tab:blue")
-    fig.supxlabel("LogFC " + xlabel, fontweight="bold")
-    fig.supylabel("LogFC " + ylabel, fontweight="bold")
+    fig.supxlabel("logFC " + xlabel, fontweight="bold")
+    fig.supylabel("logFC " + ylabel, fontweight="bold")
     ax.legend(loc="lower right")
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, f"{xlabel}_{ylabel}.png"), dpi=400)
@@ -292,12 +299,13 @@ def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
                 "LN asympt.", "LN sympt.", 
                 "EW asympt." ,"EW sympt.",
                 "MF asympt.", "MF sympt."]
-            colors = [sns.color_palette("Blues_r")[0],
-                    sns.color_palette("Blues_r")[2],
-                    sns.color_palette("Reds")[2],
-                    sns.color_palette("Reds_r")[0],
-                    sns.color_palette("Oranges")[1],
-                    sns.color_palette("Oranges_r")[1],
+            colors = [
+                (*colors_severity["LN"], 0.4),
+                colors_severity["LN"],
+                (*colors_severity["EW"], 0.4),
+                colors_severity["EW"],
+                (*colors_severity["MF"], 0.4),
+                colors_severity["MF"],
                     ]
                 
             df_plot = data[data[f"{c}_severity"].isin(levels)]
@@ -307,7 +315,7 @@ def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
                 fliersize=0, palette=colors, fill=False)
             sns.stripplot(
                 data=df_plot, x=f"{c}_severity", y=t, order = levels, 
-                palette=colors, edgecolor="k", linewidth=1, alpha=.4)
+                palette=colors, edgecolor="gray", linewidth=1, alpha=.2, s=4)
             ax.axvline(3.5, c="gray", lw=1, ls="--")
             ax.set_xticklabels(x_labels, fontdict={"weight":"bold"}, rotation=45)
             ax.set_xlabel(sympt_label[c],  fontdict={"weight":"bold"})
@@ -331,6 +339,7 @@ def plot_cont_sympt(data, res_cont_dict, c, t, save_path, add_info=""):
             plt.savefig(
                 os.path.join(save_path, f"{c}_{mapped_t}{add_info}.png"),
                   dpi=300)
+            # plt.show()
             plt.close()
 def plot_loaMF_prot(df, x, y, target, order, colors, save_path=None, show_plot=False):
     # map uniprot -> gene symbol
@@ -466,17 +475,6 @@ Furthermore, we exclude pregnant women (n=8) from the analysis and participants
 < 18 years, and selected only patients with loa monoinfection and healthy 
 controls.
 
-```{python}
-data = pd.read_csv(
-	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
-	index_col=0
-)
-data = data[(data["age"]>= 18) | data["age"].isna()]
-data = data[data["infection"].isin(["loa", "healthy controls"])]
-data = data.loc[data["pregnancy"]!="pregnant"]
-data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
-data = data.drop(data[(data["eos_high"] == "1") & (data["disease severity"] == "LN")].index)
-```
 
 ```{python}
 data = pd.read_csv(
@@ -485,20 +483,31 @@ data = pd.read_csv(
 )
 
 data_imp = pd.read_csv(
-	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_IMP_LOA_MV04.csv"),
+	os.path.join("data", "preprocessed", 
+    "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_IMP_LOA_MV04.csv"),
 	index_col=0
 )
 
 # read technical meta table
 meta_table = pd.read_csv(
     "results/loaloa/tables/technical_meta_table.csv", index_col=0)
+meta_table.loc["P06396-2", "Gene Names"] = "GSN-2"
+meta_table.loc["P04217-2", "Gene Names"] = "A1BG-2"
+meta_table.loc["A0A075B6Q5", "Gene Names"] = "IGHV3-64-2"
+meta_table.loc["P01042-2", "Gene Names"] = "KNG1-2"
+meta_table.loc["Q14624-2", "Gene Names"] = "ITIH4-2"
+meta_table.loc["P23142-4", "Gene Names"] = "FBLN1-4"
+meta_table["Gene Name"] = [f.split(" ")[0] for f in meta_table["Gene Names"]]
+
 
 data_imp["infection"] = data["infection"]
+
 
 # remove patients under 18 years old
 data = data[(data["age"]>= 18) | data["age"].isna()]
 data_imp = data_imp[(data_imp["age"]>= 18) | data_imp["age"].isna()]
 # define age groups
+
 data["age_imp"] = data["age"].fillna(200)
 data_imp["age_imp"] = data_imp["age"].fillna(200)
 data["age_group"] = pd.cut(
@@ -506,28 +515,14 @@ data["age_group"] = pd.cut(
 data_imp["age_group"] = pd.cut(
     data_imp["age_imp"], bins=[18, 34, 60, 200], labels=["<34", ">34 & <60", ">60"])
 
-
-# Select all co infections 
-# Exclude all co infections from the rest of the analysis
-data = data[data["infection"].isin(["loa", "healthy controls"])]
-
-# add threshold for absolute eosionophil counts
-data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
-
-# Load information about pregnancy and exclude pregnant women
-data_imp = data_imp.loc[data_imp["pregnancy"]!="pregnant"]
-data= data.loc[data["pregnancy"]!="pregnant"]
-```
-
-
-```{python}
 # Rename Severity Level
 severity_level_dict = {
     "eye worm+":"EW", 
     "eye worm + microfilaria":"EWMF",      
     "microfilaria+":"MF",
     "hyper microfilaria":"MF",
-    "healthy":"LN"
+    "healthy":"LN",
+    "mansonella": "MP"
     }
 data["disease severity"] = data["disease severity"].replace(
     severity_level_dict
@@ -536,11 +531,113 @@ data_imp["disease severity"] = data_imp["disease severity"].replace(
     severity_level_dict
 )
 
-# Rename controls to loa-negative
+# Rename controls to loa
 data["infection"] = data["infection"].replace(
     {"healthy controls":"LN", "loa":"INF"})
 data_imp["infection"] = data_imp["infection"].replace(
     {"healthy controls":"LN", "loa":"INF"})
+
+
+# add threshold for absolute eosionophil counts
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+# Load information about pregnancy and exclude pregnant women
+data_imp = data_imp.loc[data_imp["pregnancy"]!="pregnant"]
+data= data.loc[data["pregnancy"]!="pregnant"]
+
+
+# Exclude all co infections from the rest of the analysis
+# data = data[data["infection"].isin(["loa", "healthy controls"])]
+```
+
+```{python}
+data = pd.read_csv(
+	os.path.join("data", "preprocessed", "Preprocess_20240821_DioGenes_withoutCalCur7ves_2_min1peptides_NOIMP_LOA_NoMV.csv"),
+	index_col=0
+)
+
+severity_level_dict = {
+    "eye worm+":"EW", 
+    "eye worm + microfilaria":"EWMF",      
+    "microfilaria+":"MF",
+    "hyper microfilaria":"MF",
+    "healthy":"LN",
+    "mansonella": "MP"
+    }
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+
+data["disease severity"] = data["disease severity"].replace(
+    severity_level_dict
+)
+data_imp["disease severity"] = data_imp["disease severity"].replace(
+    severity_level_dict
+)
+
+# Rename controls to loa
+data["infection"] = data["infection"].replace(
+    {"healthy controls":"LN", "loa":"INF"})
+
+data["infection"] = data["infection"].replace({
+    "mansonella coinf": "CoMP",
+    "mansonella": "MP",
+    "malaria coinf": "CoMAL",
+    "mansonella & malaria coinf": "CoMPMAL"
+})
+
+data["severity"] = data["disease severity"] + "_" + data["infection"]
+
+data["severity"] = data["severity"].replace({
+    'EW_INF':"LLew", 
+    'EWMF_INF': "LLewmf", 
+    'LN_LN':"CTRL",
+    'MP_MP':"MP", 
+    'MF_INF':"LL",
+    'EW_CoMP': "LLew_MP",
+    'MF_CoMP': "LL_M",
+    'EWMF_CoMP': "LLewmf_MP",
+})
+
+data = data[~data["severity"].isin(["LLew", "LLew_MP", "LLewmf_MP", "LLewmf", "LLewmf_MP", "EW_CoMAL", "EW_CoMPMAL", "EWMF_CoMAL", "EWMF_CoMPMAL"])]
+
+data["eos_high"] = ["1" if x > 0.5 else "0" for x in data["eos_abs"]]
+
+data= data.loc[data["pregnancy"]!="pregnant"]
+data = data[(data["age"]>= 18) | data["age"].isna()]
+data = data.drop(
+    data[(data["eos_high"] == "1") & (data["disease severity"] == "LN")].index)
+```
+
+# Analysis Loa
+```{python}
+pept_data = pd.read_table(os.path.join(
+    "data", "preprocessing_boris", "NTD_min1peptides","NTD_min1peptides_PrecursorQuantity_reprep_normalized.tsv"
+))
+
+pept_data = pept_data.iloc[2:]
+pept_data.columns = ["Precursor.Id", "Stripped.Sequence", "Protein.Group", "Genes"] + list(pept_data.columns)[4:] 
+pept_data=pept_data.T
+
+filenames = pept_data.index[4:]
+multi_index = pd.MultiIndex.from_frame(pept_data.iloc[:4].T)
+pept_data = pept_data.iloc[4:].reset_index(drop=True)
+pept_data.columns = multi_index
+pept_data.index = filenames
+```
+
+```{python}
+#color coding fr severity classes
+colors_severity = {
+    "LN": sns.color_palette("colorblind")[0],
+    "MF": sns.color_palette("colorblind")[1],
+    "EWMF": sns.color_palette("colorblind")[2],
+    "EW": sns.color_palette("colorblind")[4],
+}
+colors_infection = {
+    "LN": sns.color_palette("colorblind")[0],
+    "INF": sns.color_palette("colorblind")[3],
+}
 ```
 
 
@@ -560,8 +657,8 @@ data["ELR"] = data["eos_abs"]/data["lym_abs"]
 data["MLR"] = data["mon_abs"]/data["lym_abs"]
 
 # Calculate log2 loa mf count 
-data["ll_mf"].replace({0:np.nan}, inplace=True)
-data["ll_mf_log2"] = np.log2(data["ll_mf"]+1)
+data["LLmf"].replace({0:np.nan}, inplace=True)
+data["LLmf_log2"] = np.log2(data["LLmf"]+1)
 ```
 
 
@@ -689,7 +786,6 @@ res_path_tables = "results/loaloa/tables"
 res_path_manuscript = "results/loaloa/manuscript"
 ```
 
-# Analyses
 ## Age & Sex Distribution
 We investigated age and sex distributions between LN and INF
 in our dataset, since we know that a big fraction of the high abundant 
@@ -729,9 +825,7 @@ ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold")
 show(data_sex.groupby(["disease severity", "sex"])["age"].median())
 ```
 
-When exploring age and sex distribution between the different severity levels, 
-we find most prnounced differences within the the MF group (5.1 years). However, 
-in the female EW subgroup, we find a bimodal age distribution. 
+When exploring age and sex distribution between the different severity levels, we find most prnounced differences within the the MF group (5.1 years). However, in the female EW subgroup, we find a bimodal age distribution. 
 
 Due to missing or unclear age information for 41 participants in the LN group, 
 we categorized age into three groups: under 34 years, between 34 and 60 years, 
@@ -790,8 +884,7 @@ plt.show()
 show(s)
 ```
 
-Sex distributions between the INF and LN group are almost the same, with more 
-women in both groups (~ 60%).
+Sex distributions between the INF and LN group are almost the same, with more women in both groups (~ 60%).
 
 ```{python}
 s = data_sex.groupby(["disease severity"])["sex"].value_counts(normalize=True).mul(100)
@@ -807,8 +900,7 @@ plt.show()
 show(s)
 ```
 
-When investigating the different severity levels, we observed huge differences
-between the EW (27.7 % men) and MF (71.1 % men).
+When investigating the different severity levels, we observed huge differences between the EW (27.7 % men) and MF (71.1 % men).
 
 Furthermore, we are interested into the differences of sex in the different severity groups, 
 since there are more male cases in the MF group and more female ones in EW.
@@ -873,22 +965,22 @@ save_path_limma = "results/loaloa/plots/limma"
 plot_volcano_limma(
     limma_inf_ctrl, add_info="volcano_ctrl_inf_05",
     save_path=save_path_limma)
-plot_volcano_limma(
-    limma_mf_ew, add_info="volcano_mf_ew_05",
-    save_path=save_path_limma)
-plot_volcano_limma(
-    limma_mf_ewmf, add_info="volcano_mf_ewmf_05",
-    save_path=save_path_limma)
-limma_ew_ewmf["logFC"] = limma_ew_ewmf["logFC"]*-1# contrast was defined inversly
-plot_volcano_limma(
-    limma_ew_ewmf, add_info="volcano_ew_ewmf_05",
-    save_path=save_path_limma)
-plot_volcano_limma(
-    limma_mfewmf_ctrl, add_info="volcano_mfewmf_ctrl_05",
-    save_path=save_path_limma)
-plot_volcano_limma(
-    limma_ew_ctrl, add_info="volcano_ew_ctrl_05",
-    save_path=save_path_limma)
+# plot_volcano_limma(
+#     limma_mf_ew, add_info="volcano_mf_ew_05",
+#     save_path=save_path_limma)
+# plot_volcano_limma(
+#     limma_mf_ewmf, add_info="volcano_mf_ewmf_05",
+#     save_path=save_path_limma)
+# limma_ew_ewmf["logFC"] = limma_ew_ewmf["logFC"]*-1# contrast was defined inversly
+# plot_volcano_limma(
+#     limma_ew_ewmf, add_info="volcano_ew_ewmf_05",
+#     save_path=save_path_limma)
+# plot_volcano_limma(
+#     limma_mfewmf_ctrl, add_info="volcano_mfewmf_ctrl_05",
+#     save_path=save_path_limma)
+# plot_volcano_limma(
+#     limma_ew_ctrl, add_info="volcano_ew_ctrl_05",
+#     save_path=save_path_limma)
 ```
 
 
@@ -935,6 +1027,7 @@ plot_fc_diff(
     limma_ew_ctrl,limma_mfewmf_ctrl,
     xlabel="EW vs LN",ylabel="MF + EWMF vs LN", save_path=save_path_limma)
 ```
+
 ## Correlation of Plasma proteins with FBC (& ratios) and Loa microfilarial count
 
 We calculated spearman correlation coefficients between full blood counts, 
@@ -942,25 +1035,25 @@ their ratios and the micorfilarial loa count, a.o. Fig 1E.
 
 ```{python}
 # create path
-save_path_ll =  f"results\loaloa\plots\prot_log2_llmf"
-if not os.path.exists(save_path_bc):
-    os.mkdir(save_path_bc)
+# save_path_ll =  f"results\loaloa\plots\prot_log2_llmf"
+# if not os.path.exists(save_path_bc):
+#     os.mkdir(save_path_bc)
 
 # Select only data with loa loa mf count > 0
-data[f"ll_mf_log2"] = np.log2(data[f"ll_mf"]+1)
-data_zero_ll = data[data["ll_mf_log2"]>0]
-corr_ll_mf = pd.DataFrame(
+data[f"LLmf_log2"] = np.log2(data[f"LLmf"]+1)
+data_zero_ll = data[data["LLmf_log2"]>0]
+corr_LLmf = pd.DataFrame(
     [spearmanr(
-        data_zero_ll[p], data_zero_ll["ll_mf"], 
+        data_zero_ll[p], data_zero_ll["LLmf"], 
         nan_policy="omit") for p in common_proteins],
     index=common_proteins).sort_values(by="statistic")
-corr_ll_mf["Genes"] = meta_table.loc[common_proteins, "Gene Names"]
+corr_LLmf["Genes"] = meta_table.loc[common_proteins, "Gene Names"]
 
 
 order=["MF", "EWMF"]
 colors=[
-    sns.color_palette('colorblind')[1], 
-    sns.color_palette('colorblind')[3], 
+    colors_severity["MF"], 
+    colors_severity["EWMF"], 
 ]
 ```
 
@@ -973,12 +1066,12 @@ for i, p in enumerate([
     "P01860", "P01861", "P13796",
     "P60709", "P05543"]): 
 
-    df = data_sel
+    df = data
     y=p
-    x="ll_mf_log2"
+    x="LLmf_log2"
     target="disease severity"
 
-    mapped_y = meta_table_proteins[meta_table_proteins.index == y]["Gene Names"].values[0]
+    mapped_y = meta_table[meta_table.index == y]["Gene Names"].values[0]
     # remove NA's
     common_ids = list(set(df[x].dropna().index) & set(df[y].dropna().index))
     df = df.copy()
@@ -996,7 +1089,11 @@ for i, p in enumerate([
     ax[i].set_yticklabels(ax[i].get_yticklabels(), fontweight="bold")
     ax[i].set_xticklabels(ax[i].get_xticklabels(), fontweight="bold")
     s_rho, p = spearmanr(df.loc[common_ids, x],df.loc[common_ids, y])
-    ax[i].set_title(r'$\mathbf{{{}}}$ {}'.format(mapped_y.split(" ")[0], "\n $s_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.2f}"))
+    
+    if p >= 0.001:
+        ax[i].set_title(r'$\mathbf{{{}}}$ {}'.format(mapped_y.split(" ")[0], "\n $s_{\\rho}$: " + f"{s_rho:.2f}, p: {p:.3f}"))
+    else: 
+        ax[i].set_title(r'$\mathbf{{{}}}$ {}'.format(mapped_y.split(" ")[0], "\n $s_{\\rho}$: " + f"{s_rho:.2f}, p < 0.001"))
     ax[i].grid()  
 ax[0].set_ylabel("$\\mathbf{log_2}$ protein abundance", 
             fontweight="bold")
@@ -1109,9 +1206,10 @@ g.ax_heatmap.set_ylabel(
 cbar = g.ax_heatmap.collections[0].colorbar
 cbar.set_label(
     "Spearman's $\\bf{\\rho}$", weight='bold')
+plt.
 plt.savefig(
     os.path.join(res_path_plots, "correlation_clinicalVariables", "heatmap_corr_prot_clinicalVar.png"),
-    dpi=400
+    dpi=600
     )
 ```
 ## Symptom Association
@@ -1255,9 +1353,10 @@ g.ax_heatmap.set_ylabel("Reported Symptoms" , fontweight='bold', size=14)
 cbar = g.ax_heatmap.collections[0].colorbar
 cbar.set_label('log2 FC \n(EW sympt vs LN asympt.)', weight='bold', size=14)
 cbar.set_ticks([-0.8, -0.4, 0. , 0.4, 0.8])
+plt
 plt.savefig(
     os.path.join(res_path_plots, "symptoms", "continuum_ln_ew_trend_jt_05newCat.png"),
-    dpi=400
+    dpi=600
     )
 ```
 
@@ -1283,11 +1382,12 @@ for c in signif_jt_df.index:
         if signif_jt_df.loc[c, t]:
             plot_cont_sympt(
                 data_mono, res_cont_dict, c, t, path_cont_boxplots, add_info="_jt_05")
-for c in signif_kw_df.T.index:
-    for t in signif_kw_df.T.columns:
-        if signif_kw_df.T.loc[c, t]:
-            plot_cont_sympt(
-                data_mono, res_cont_dict, c, t, path_cont_boxplots, add_info="_kw_05")
+
+# for c in signif_kw_df.T.index:
+#     for t in signif_kw_df.T.columns:
+#         if signif_kw_df.T.loc[c, t]:
+#             plot_cont_sympt(
+#                 data_mono, res_cont_dict, c, t, path_cont_boxplots, add_info="_kw_05")
 ```
 
 Fig 2B
@@ -1407,11 +1507,6 @@ data_ml_1 = data_imp[data_imp["Sample ID"].isin(ids_ml_1)]
 data_ml_2 = data_imp[data_imp["Sample ID"].isin(ids_ml_2)]
 data_ml_3 = data_imp[data_imp["Sample ID"].isin(ids_ml_3)]
 ```
-
-<!-- ```{python}
-data_ml_2 = data_ml_2[data_ml_2["disease severity"].isin(["LN", "EW"])]
-data_ml_3 = data_ml_3[data_ml_3["disease severity"].isin(["LN", "EWMF", "MF"])]
-``` -->
 
 
 ```{python}
@@ -1623,9 +1718,9 @@ def perform_loocv(
     return y_pred_prob, y_preds, feature_importances
 
 
-# best_params_ref_1 = {'max_depth': 3, 'n_estimators': 39}
-# best_params_ref_2 = {'max_depth': 3, 'n_estimators': 70}
-# best_params_ref_3 = {'max_depth': 3, 'n_estimators': 85}
+best_params_ref_1 = {'max_depth': 3, 'n_estimators': 39}
+best_params_ref_2 = {'max_depth': 3, 'n_estimators': 70}
+best_params_ref_3 = {'max_depth': 3, 'n_estimators': 85}
 
 y_pred_prob_1, y_preds_1, feat_imp_1 = perform_loocv(
     X_1_feat_ref, y_1, clf, best_params_ref_1, random_state=RANDOM_STATE
@@ -1693,7 +1788,7 @@ Here, we evaluate our ML models for sensitivity and report 71.02 (n=69),
 
 ```{python}
 data_ml_3["mf_bins"] = pd.cut(
-    data_ml_3["ll_mf"], 
+    data_ml_3["LLmf"], 
     bins=[0, 1000, 8000, 50000], 
     labels=["<1000", "<8000", "<50000"])
 
@@ -1720,8 +1815,8 @@ sensitivity_8k = tp / (tp + fn)
 ```{python}
 fig, ax = plt.subplots(1,1, figsize=(5,1))
 sns.histplot(ax=ax,
-    x=data_ml_3.loc[idx_allmf, "ll_mf"],
-    alpha=0.3, color=sns.color_palette("colorblind")[5], edgecolor="k", linewidth=1), 
+    x=data_ml_3.loc[idx_allmf, "LLmf"],
+    alpha=0.3, color=colors_severity["EWMF"], edgecolor="k", linewidth=1), 
 ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
 ax.set_xticklabels([])
 ax.set_xlabel("")
@@ -1738,7 +1833,7 @@ plt.show()
 fig, ax = plt.subplots(1,1, figsize=(0.5,5))
 sns.histplot(ax=ax,
     y=pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
-    alpha=0.3, color=sns.color_palette("colorblind")[5], edgecolor="k", linewidth=1),
+    alpha=0.3, color=colors_severity["EWMF"], edgecolor="k", linewidth=1),
 ax.set_yticklabels([])
 ax.set_xticklabels([])
 ax.set_xlabel("")
@@ -1754,23 +1849,24 @@ plt.savefig(
 plt.show()
 
 fig, ax = plt.subplots(1,1, figsize=(5,5))
-data_ml_3["ll_mf_log10"] = np.log10(data_ml_3["ll_mf"])
+data_ml_3["LLmf_log10"] = np.log10(data_ml_3["LLmf"])
 ax.scatter(
     y=pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
-    x=data_ml_3.loc[idx_allmf, "ll_mf"],
-    alpha=0.3, ec="k", lw=0.5, c=sns.color_palette("colorblind")[5])
+    x=data_ml_3.loc[idx_allmf, "LLmf"],
+    alpha=0.3, ec="k", lw=0.5, c=colors_severity["EWMF"])
 ax.axhline(0.5, c="gray", ls="--", lw=2)
 ax.axvline(1000, c="gray", ls="--", lw=2)
 ax.axvline(8000, c="gray", ls="--", lw=2)
 ax.set_ylabel("$\\bf{\widetilde{P}\ (y=MF+EWMF)}$", fontweight="bold", fontsize=14)
+ax.set_ylabel("Pred. Prob. (MF+EWMF)", fontweight="bold", fontsize=14)
 ax.set_xlabel("Loa MF count per ml", fontweight="bold", fontsize=14)
 ax.set_xticklabels(ax.get_xticklabels(), weight="bold")
 ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
 ax.grid()
-plt.legend(["Patient Sample"])
+# plt.legend(["Patient Sample"])
 spearmanr(
     pd.Series(y_pred_prob_3, index=y_3.index).loc[idx_allmf],
-    data_ml_3.loc[idx_allmf, "ll_mf"])
+    data_ml_3.loc[idx_allmf, "LLmf"])
 plt.savefig(os.path.join(ml_path_plots, "ml3_pred_prob_llmf.png"), dpi=400)
 plt.show()
 ```
@@ -1789,9 +1885,9 @@ sensitivity_ew_rl_ly = tp / (tp + fn)
 
 ```{python}
 colors_contrasts = [
-    sns.color_palette("colorblind")[1],
-    "tab:red",
-    sns.color_palette("colorblind")[5]
+    colors_infection["INF"],
+    colors_severity["EW"],
+    colors_severity["EWMF"]
 ]
 contrasts = ["INF", "EW", "MF+EWMF"]
 
@@ -1861,23 +1957,23 @@ def plot_predicted_probability(
 plot_predicted_probability(
     y_1, y_pred_prob_1,
     colors=[
-        sns.color_palette("colorblind")[0], 
-        colors_contrasts[0]],
-    xticklabels=["LN", "INF."], ylabel="$\\bf{\widetilde{P}\ (y=INF)}$",
+        colors_infection["LN"], 
+        colors_infection["INF"]],
+    xticklabels=["LN", "INF."], ylabel="Pred. Prob. (INF)",
     save_path=ml_path_plots)
 plot_predicted_probability(
     y_2, y_pred_prob_2, 
     colors=[
-        "tab:blue", 
-        colors_contrasts[1]],
-    xticklabels=["LN", "EW"], ylabel="$\\bf{\widetilde{P}\ (y=EW)}$",
+        colors_severity["LN"],
+        colors_severity["EW"]],
+    xticklabels=["LN", "EW"], ylabel="Pred. Prob. (EW)",
     save_path=ml_path_plots)
 plot_predicted_probability(
     y_3, y_pred_prob_3, 
     colors=[
-        sns.color_palette("colorblind")[0], 
-        colors_contrasts[2]],
-    xticklabels=["LN", "MF+EWMF"], ylabel="$\\bf{\widetilde{P}\ (y=MF+EWMF)}$",
+        colors_severity["LN"],
+        colors_severity["EWMF"]],
+    xticklabels=["LN", "MF+EWMF"], ylabel="Pred. Prob. (MF+EWMF)",
     save_path=ml_path_plots)
 ```
 
@@ -1921,21 +2017,22 @@ def plot_featimp(
     ax.set_ylabel("", fontweight="bold")
     ax.set_xlabel("Feat. Imp", fontweight="bold")
     plt.tight_layout()
-    if save_path != None:
-        plt.savefig(os.path.join(save_path, f'feat_imp{add_info}.png'),dpi=400)
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
+    # if save_path != None:
+    #     plt.savefig(os.path.join(save_path, f'feat_imp{add_info}.png'),dpi=400)
+    plt.show()
+    # if show_plot:
+    #     plt.show()
+    # else:
+    #     plt.close()
 
 plot_featimp(
-    feat_imp_df_1, colors_contrasts[0], 
+    feat_imp_df_1, colors_infection["INF"], 
     save_path=ml_path_plots, add_info="LNvsINF")
 plot_featimp(
-    feat_imp_df_2.iloc[:, :15], colors_contrasts[1], 
+    feat_imp_df_2.iloc[:, :15], colors_severity["EW"], 
     save_path=ml_path_plots, add_info="LNvsEW")
 plot_featimp(
-    feat_imp_df_3.iloc[:, :15], colors_contrasts[2], 
+    feat_imp_df_3.iloc[:, :15], colors_severity["EWMF"], 
     save_path=ml_path_plots, add_info="LNvsMF+EWMF")
 ```
 
@@ -1944,7 +2041,7 @@ Next, we assessed how sensitive our ML models are with respect to detection
 of L. Loa infection in different groups of microfilarial burden and eyeworm.
 ```{python}
 data_ml_3["mf_bins"] = pd.cut(
-    data_ml_3["ll_mf"], 
+    data_ml_3["LLmf"], 
     bins=[0, 1000, 8000, 50000], 
     labels=["<1000", "<8000", "<50000"])
 
@@ -1980,7 +2077,7 @@ Figure 3B
 
 fig, ax = plt.subplots(1,1, figsize=(5,1))
 sns.histplot(
-    ax=ax,x=data_ml_3.loc[idx_allmf, "ll_mf"],
+    ax=ax,x=data_ml_3.loc[idx_allmf, "LLmf"],
     alpha=0.3, color=sns.color_palette("colorblind")[5], 
     edgecolor="k", linewidth=1),
 ax.set_yticklabels(ax.get_yticklabels(), weight="bold")
@@ -2000,12 +2097,7 @@ Plots for selected Marker shown in Figure 1C.
 
 ```{python}
 order = ["LN", "EW", "EWMF", "MF"]
-colors = [
-    "tab:blue", 
-    "tab:red",
-    sns.color_palette('colorblind')[1], 
-    sns.color_palette('colorblind')[3], 
-    ]
+colors = [colors_severity[g] for g in order]
 fig, axs = plt.subplots(2,2, figsize=(5, 5))
 for i, (p, ax) in enumerate(zip(
     ["P01860", "P01861", "P13796", "P60709"], 
@@ -2016,7 +2108,7 @@ for i, (p, ax) in enumerate(zip(
         fill=False, fliersize=0, palette=colors)
     sns.stripplot(ax=ax,
         data=data, y=p, x="disease severity", order=order,
-        palette=colors, edgecolor="gray", linewidth=1, alpha=.1)
+        palette=colors, edgecolor="gray", linewidth=1, alpha=.2)
     ax.set_ylabel("")
     ax.set_xlabel("")
     ax.set_xticklabels(order, fontweight="bold")
@@ -2066,3 +2158,1568 @@ tn, fp, fn, tp = confusion_matrix(
     y_3, pd.Series(y_igg4, index=y_3.index)).ravel()
 sensitivity_all_igg4 = tp / (tp + fn)
 ```
+
+# Revision Loa
+
+*Revision 1:*
+We add correlations between age and sex as well as sex differences within the text to the Supplement.
+
+```{python}
+candidates = ["IGHG3", "IGHG4", "ACTBL2", "IGLV9-49", "LCP1 PLS2", "SHBG", "ACTB", "FETUB", "S100A9 CAGB CFAG MRP14", "PFN1"]
+
+data_matched = data[data["Sample ID"].isin(ids_ml_1)]
+
+for c in candidates:
+    mapped_c = meta_table[meta_table["Gene Names"]==c].index[0]
+    fig, axs = plt.subplots(1,2, figsize=(10,5), sharey=True)
+    
+    for s in ["LN", "INF"]:
+        data_sev = data[data["infection"]==s].copy()
+        data_matched_sev = data_matched[data_matched["infection"]==s].copy()
+
+        s_rho, p = spearmanr(
+            data_sev[mapped_c], 
+            data_sev["age"], 
+            nan_policy="omit")
+        s_rho_matched, p_matched = spearmanr(
+            data_matched_sev[mapped_c], 
+            data_matched_sev["age"], 
+            nan_policy="omit")
+        
+        data_fit = pd.concat(
+                [data_sev[mapped_c], data_sev["age"]], axis=1).dropna()
+        m, b = np.polyfit(x=data_fit[mapped_c], y=data_fit["age"], deg=1)
+        y_fit = m*data_fit[mapped_c]+b
+
+        data_fit_matched = pd.concat([
+            data_matched_sev[mapped_c], data_matched_sev["age"]
+        ], axis=1).dropna()
+        m_matched, b_matched = np.polyfit(x=data_fit_matched[mapped_c], y=data_fit_matched["age"], deg=1)
+        y_fit_matched = m_matched*data_fit_matched[mapped_c]+b_matched
+
+
+        if c in ["IGHG4", "ACTBL2", "IGLV9-49"]:
+            m, m_matched = m_matched, m
+            b, b_matched = b_matched, b
+
+            s_rho, s_rho_matched = s_rho_matched, s_rho
+            p, p_matched = p_matched, p
+
+            axs[1].plot(data_fit[mapped_c], y_fit, c=colors_infection[s])
+            axs[0].plot(data_fit_matched[mapped_c], y_fit_matched, c=colors_infection[s])
+        else:
+            axs[0].plot(data_fit[mapped_c], y_fit, c=colors_infection[s])
+            axs[1].plot(data_fit_matched[mapped_c], y_fit_matched, c=colors_infection[s])
+
+        axs[0].scatter(
+            x=data_sev[mapped_c], 
+            y=data_sev["age"],
+            label= f"{s}, r: {s_rho:.2f}, p: {p:.2f}",
+            c=[colors_infection[s]])
+        axs[1].scatter(
+            x=data_matched_sev[mapped_c], 
+            y=data_matched_sev["age"],
+            label= f"{s}, r: {s_rho_matched:.2f}, p: {p_matched:.2f}",
+            c=[colors_infection[s]])
+
+        axs[0].set_title("Before Matching", fontweight="bold")
+        axs[1].set_title("After Matching", fontweight="bold")
+    
+        axs[0].legend()
+        axs[1].legend()
+
+        fig.supylabel(
+            "age in years", fontweight="bold")
+        fig.supxlabel(
+            "$\\bf{Log_2}$" + f" {c.split(' ')[0]} Protein Abundance", fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        "results", "loaloa", "manuscript", "Supplement_Review_1", f"age_{c.split(' ')[0]}_cont.png"
+    ))
+    plt.show()
+
+    # break
+
+    
+```
+
+
+```{python}
+for c in candidates:
+    mapped_c = meta_table[meta_table["Gene Names"]==c].index[0]
+    fig, axs = plt.subplots(1,2, figsize=(10,5), sharey=True)
+
+    sns.stripplot(
+        ax=axs[0],
+        data=data,
+        x="age_group",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=1,
+        legend=False
+    )
+    sns.stripplot(
+        ax=axs[1],
+        data=data_matched,
+        x="age_group",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=1,
+        legend=False
+    )
+
+    if c in ["IGHG4", "ACTBL2", "IGLV9-49"]:
+        data, data_matched = data_matched, data
+
+    sns.boxplot(
+        ax=axs[0],
+        data=data,
+        x="age_group",
+        y=mapped_c,
+        hue="infection",
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        fliersize=0
+    )
+    sns.boxplot(
+        ax=axs[1],
+        data=data_matched,
+        x="age_group",
+        y=mapped_c,
+        hue="infection",
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        fliersize=0,
+        legend=False
+    )
+
+    axs[0].set_title("Before Matching")
+    axs[1].set_title("After Matching")
+    
+    for ax in axs:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+    
+
+    fig.supxlabel(
+        "age groups in years", fontweight="bold")
+    fig.supylabel(
+        "$\\bf{Log_2}$" + f" {c.split(' ')[0]} Protein Abundance", fontweight="bold")
+    
+    plt.tight_layout()
+
+    plt.savefig(os.path.join(
+        "results", "loaloa", "manuscript", "Supplement_Review_1", f"agegroups_{c.split(' ')[0]}_cat.png"
+    ))    
+    plt.show()
+
+    break
+    
+```
+
+Differences in Sex 
+
+```{python}
+for c in candidates:
+    mapped_c = meta_table[meta_table["Gene Names"]==c].index[0]
+    fig, axs = plt.subplots(1,2, figsize=(10,5), sharey=True)
+
+    sns.stripplot(
+        ax=axs[0],
+        data=data,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=3,
+        legend=False,
+        hue_order=["LN", "INF"],
+        palette=[colors_infection["LN"], colors_infection["INF"]]
+    )
+    sns.stripplot(
+        ax=axs[1],
+        data=data,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=3,
+        legend=False,
+        hue_order=["LN", "INF"],
+        palette=[colors_infection["LN"], colors_infection["INF"]]
+    )
+
+    # if c in ["IGHG4", "ACTBL2", "IGLV9-49"]:
+    #     data, data_matched = data_matched, data
+
+    sns.boxplot(
+        ax=axs[0],
+        data=data,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        hue_order=["LN", "INF"],
+        fliersize=0
+    )
+    sns.boxplot(
+        ax=axs[1],
+        data=data_matched,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        hue_order=["LN", "INF"],
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        fliersize=0,
+    )
+    for ax in axs:
+        ax.set_xlabel("")
+        ax.set_xticklabels(["Women", "Men"])
+        ax.set_ylabel("")
+        ax.legend(loc="upper right")
+    
+    axs[0].set_title("Before Matching", fontweight="bold")
+    axs[1].set_title("After Matching", fontweight="bold")
+
+    fig.supxlabel(
+        "Sex", fontweight="bold")
+    fig.supylabel(
+        "$\\bf{Log_2}$" + f" {c.split(' ')[0]} Protein Abundance", fontweight="bold")
+    
+
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        "results", "loaloa", "manuscript", "Supplement_Review_1", f"sex_{c.split(' ')[0]}_cat.png"
+    ))
+    plt.show()
+
+```
+
+Sex differences in EW vs EWMF 
+
+```{python}
+ids_ew_ewmf = pd.read_csv(
+    "data/analysis/loa/matched/data_matched_ew_ewmf_05.csv")["Sample ID"]
+
+
+data_matched = data_imp[data_imp["Sample ID"].isin(ids_ew_ewmf)]
+
+```
+
+```{python}
+data_matched
+
+for c in candidates:
+    mapped_c = meta_table[meta_table["Gene Names"]==c].index[0]
+    fig, axs = plt.subplots(1,2, figsize=(10,5), sharey=True)
+
+    sns.stripplot(
+        ax=axs[0],
+        data=data,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=3,
+        legend=False
+    )
+    sns.stripplot(
+        ax=axs[1],
+        data=data_matched,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        dodge=True,
+        c="k", s=3,
+        legend=False
+    )
+
+    # if c in ["IGHG4", "ACTBL2", "IGLV9-49"]:
+    #     data, data_matched = data_matched, data
+
+    sns.boxplot(
+        ax=axs[0],
+        data=data,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        fliersize=0
+    )
+    sns.boxplot(
+        ax=axs[1],
+        data=data_matched,
+        x="sex",
+        y=mapped_c,
+        hue="infection",
+        palette=[colors_infection["LN"], colors_infection["INF"]],
+        fliersize=0,
+    )
+    for ax in axs:
+        ax.set_xlabel("")
+        ax.set_xticklabels(["Women", "Men"])
+        ax.set_ylabel("")
+        ax.legend(loc="upper right")
+    
+    axs[0].set_title("Before Matching", fontweight="bold")
+    axs[1].set_title("After Matching", fontweight="bold")
+
+    fig.supxlabel(
+        "Sex", fontweight="bold")
+    fig.supylabel(
+        "$\\bf{Log_2}$" + f" {c.split(' ')[0]} Protein Abundance", fontweight="bold")
+    
+
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        "results", "loaloa", "manuscript", "Supplement_Review_1", f"sex_{c.split(' ')[0]}_cat.png"
+    ))
+    plt.show()
+```
+
+We further investigate for whether Sex differences between severity groups are statically significant. 
+```{python}
+
+
+# over all groups
+contingency_table_all = pd.crosstab(data['sex'], data['disease severity'])
+chi2, p_all, dof, expected = chi2_contingency(contingency_table_all)
+
+# Infection
+sex_counts_inf = data.loc[
+    data["infection"]=="INF", 'sex'].value_counts().values
+chi2, p_inf= chisquare(sex_counts_inf)
+
+# EW
+sex_counts_ew = data.loc[
+    data["disease severity"]=="EW", 'sex'].value_counts().values
+chi2, p_ew= chisquare(sex_counts_ew)
+
+# MF
+sex_counts_mf = data.loc[
+    data["disease severity"]=="MF", 'sex'].value_counts().values
+chi2, p_mf= chisquare(sex_counts_mf)
+
+# EWMF
+sex_counts_ewmf = data.loc[
+    data["disease severity"]=="EWMF", 'sex'].value_counts().values
+chi2, p_ewmf= chisquare(sex_counts_ewmf)
+```
+
+
+```{python}
+mannwhitneyu(
+    data[data["infection"]=="INF"]["age"], 
+    data[data["infection"]=="LN"]["age"], 
+    nan_policy="omit"
+)
+
+data.groupby("infection")["sex"].value_counts(normalize=True)
+```
+
+## PCA between EW and MF (Rev II, Comment 5)
+
+```{python}
+candidates = ["IGHG3", "IGHG4", "ACTBL2", "IGLV9-49", "LCP1 PLS2", "SHBG", "ACTB", "FETUB", "S100A9 CAGB CFAG MRP14", "PFN1"]
+```
+
+```{python}
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+def plot_pca(
+    pca_data, pca_var, pca_loadings, features, pc_x, pc_y,
+    target = None, target_groups = None, alpha = 0.5, target_colors= None,
+    annot=None, show_arrows=True, arrow_color = '#00000050', annot_color = '#00000050', arrow_alpha = 0.2, annot_alpha = 0.9,
+    show_plot=False, show_legend=False, save_path=None, add_info=""):
+
+        unsigned_range = lambda x: np.array([-abs(min(x)), abs(max(x))])
+        print(unsigned_range)
+        scl = np.max([
+            unsigned_range(pca_loadings[:, pc_x]) / unsigned_range(pca_data[pc_x]),
+            unsigned_range(pca_loadings[:, pc_y]) / unsigned_range(pca_data[pc_y])])
+        pca_loadings = (pca_loadings/scl) 
+
+        if target_groups != None:
+            pca_data = pca_data[pca_data[target].isin(target_groups)]
+
+        fig, ax = plt.subplots(1,1, figsize=(6,6))
+        if target_groups== None:
+            sns.scatterplot(data=pca_data, x=pc_x, y=pc_y, hue=target, alpha=alpha, edgecolor="k", palette=target_colors, linewidth=1.5, legend=False)
+        else:
+            sns.scatterplot(data=pca_data, x=pc_x, y=pc_y, hue=target, alpha=alpha, edgecolor="k", hue_order=target_groups, palette=target_colors, linewidth=1.5, legend=False)
+
+        ax.set_ylabel(f"PC{pc_y+1} ({pca_var[pc_y]:.2f})", fontdict={"weight":"bold", "size":14})
+        ax.set_xlabel(f"PC{pc_x+1} ({pca_var[pc_x]:.2f})", fontdict={"weight":"bold", "size":14})
+        ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold", fontsize=9)
+        ax.set_xticklabels(ax.get_xticklabels(), fontweight="bold", fontsize=9)
+
+        if annot != None:
+            idx_features = [list(features).index(p) for p in annot]
+            if not isinstance(annot, list):
+                annot = list(annot)
+        # Add Annotations and arrows
+            for i, feature in zip(idx_features, annot):
+
+                # Add the name of the variable near the arrow
+                plt.annotate(feature, # variable name
+                            (pca_loadings[i, pc_y], pca_loadings[i, pc_x]),
+                            color=annot_color,
+                            alpha=annot_alpha, fontsize=10)
+                
+                # Add an arrow representing the variable on the new axis
+                ax.arrow(0, 0,
+                        pca_loadings[i, pc_y],
+                        pca_loadings[i, pc_x],
+                        color=arrow_color,
+                        alpha=arrow_alpha, 
+                        width=0.01,
+                        linestyle="--", head_width=0.2
+                        ) 
+        # overlay arrows with data_points
+        if target_groups== None:
+            sns.scatterplot(data=pca_data, x=pc_x, y=pc_y, hue=target, alpha=alpha, edgecolor="k", palette=target_colors,  linewidth=0.5)
+        else:
+            sns.scatterplot(data=pca_data, x=pc_x, y=pc_y, hue=target, alpha=alpha, edgecolor="k", hue_order=target_groups, palette=target_colors, linewidth=0.5)
+
+        if show_legend != True:
+            plt.legend().remove()
+        plt.tight_layout()
+        plt.grid(linestyle="--")
+        if save_path != None:
+            plt.savefig(os.path.join(save_path, f'pca_{target}{add_info}.png'),dpi=400)
+        if show_plot:
+            plt.show()
+        else:
+            plt.close()
+
+def perform_pca(data, n_components=20):
+
+    pca = PCA(n_components=n_components)
+    
+    data_scaled = StandardScaler().fit_transform(data)
+    data_pca = pca.fit_transform(data_scaled)
+    var_pca = pca.explained_variance_ratio_*100
+    
+    loadings = pca.components_.T #* np.sqrt(pca.explained_variance_ratio_)
+
+    return data_pca, var_pca, loadings
+
+```
+
+
+```{python}
+
+features_pca = ["IGHG3", "IGHG4", "ACTBL2", "IGLV9-49", "LCP1 PLS2", "SHBG", "PFN1"]
+
+data_pca = data_imp[data_imp["disease severity"].isin(["EW", "MF"])]
+data_pca = data_pca[common_proteins_imp].copy()
+data_pca.columns = meta_table.loc[common_proteins_imp, "Gene Names"]
+data_pca = data_pca[features_pca]
+
+
+pca_data, pca_var, pca_loadings = perform_pca(
+    data_pca[features_pca], n_components=5)
+
+pca_data = pd.DataFrame(pca_data, index=data_pca.index)
+
+pca_data_with_meta = pd.concat([
+    pca_data,
+    data_imp.loc[data_pca.index, ["disease severity", "sex"]]],
+    axis=1) 
+
+```
+
+```{python}
+pc_x = 0
+pc_y = 1
+
+plot_pca(
+    pca_data_with_meta, pca_var, pca_loadings, features_pca, 
+    pc_x=pc_x, pc_y=pc_y, alpha=0.9, show_plot=True,  target="disease severity", annot=features_pca, target_groups=["MF", "EW"], show_arrows=True,
+    target_colors=[colors_severity["MF"], colors_severity["EW"]], 
+    save_path=None, add_info="EWvsMF", show_legend=True)
+
+plt.figure(figsize=(6,2))
+sns.histplot(data=pca_data_with_meta[[pc_x, "disease severity"]], x=pc_x, hue="disease severity", palette=[colors_severity["EW"], colors_severity["MF"]], legend=False)
+plt.xlabel("")
+plt.tight_layout()
+plt.show()
+plt.figure(figsize=(6,2))
+sns.histplot(data=pca_data_with_meta[[pc_y, "disease severity"]], x=pc_y, hue="disease severity", palette=[colors_severity["EW"], colors_severity["MF"]], legend=False)
+plt.xlabel("")
+plt.tight_layout()
+plt.show()
+```
+
+Since only ACTB and IGHG4 signigficanlty differ, we suggest adding a scatterplot.
+
+```{python}
+
+meta_table[meta_table["Gene Names"].isin(["IGHG4", "ACTB"])]
+
+x = "P01861"
+y = "P60709"
+
+fig = plt.figure(figsize=(6.5, 6.5))
+gs = fig.add_gridspec(
+    4, 4, 
+    width_ratios=[0.5, 2, 0.5, 0.5],
+    height_ratios=[0.5, 2, 0.5, 0.5])
+ax0 = fig.add_subplot(gs[1:3, 0:2])
+
+median_mf = matched_MF_EW.loc[
+    matched_MF_EW["disease severity"]=="MF", [x, y]].median()
+median_ew = matched_MF_EW.loc[
+    matched_MF_EW["disease severity"]=="EW", [x, y]].median()
+
+ax0.scatter(
+    x=matched_MF_EW.loc[matched_MF_EW["disease severity"]=="MF", x], 
+    y=matched_MF_EW.loc[matched_MF_EW["disease severity"]=="MF", y],  
+    c=colors_severity["MF"], alpha=0.8, marker="o", label="")
+ax0.scatter(
+    x=median_mf[x], y=median_mf[y], 
+    s=100, c=colors_severity["MF"], alpha=1, marker="o", label="median MF",
+    ec="k", lw=2)
+
+ax0.scatter(
+    x=matched_MF_EW.loc[matched_MF_EW["disease severity"]=="EW", x], 
+    y=matched_MF_EW.loc[matched_MF_EW["disease severity"]=="EW", y],  
+    c=colors_severity["EW"], alpha=0.8, marker="^", label="")
+ax0.scatter(
+    x=median_ew[x], y=median_ew[y], 
+    s=100, c=colors_severity["EW"], alpha=1, marker="^", label="median EW",
+    ec="k", lw=2)
+ax0.grid()
+ax0.set_ylabel("$\\mathbf{log_2}$" + f"ACTB abundance", 
+            fontweight="bold")
+ax0.set_xlabel("$\\mathbf{log_2}$" + f" IGHG4 abundance", 
+            fontweight="bold")
+ax0.set_yticklabels(ax0.get_yticklabels(), 
+            fontweight="bold")
+ax0.set_xticklabels(ax0.get_xticklabels(), 
+            fontweight="bold")
+# ax0.legend()
+# ax0.set_xlabel("log2 abundance IGHG4")
+# ax0.set_ylabel("log2 abundance")
+# plt.title("Matched Data")
+# plt.tight_layout()
+# plt.show()
+plt.legend()
+
+ax1 = fig.add_subplot(gs[1:3, 2])
+sns.boxplot(ax=ax1,
+    data=matched_MF_EW, x="disease severity", y=y, hue="disease severity",
+    palette=[colors_severity["EW"], colors_severity["MF"]])
+ax1.set_xlabel("")
+ax1.set_ylabel("")
+# ax1.set_xticks([])
+ax1.set_yticks([])
+
+ax1.set_xticklabels(ax1.get_xticklabels(), 
+            fontweight="bold")
+
+ax2 = fig.add_subplot(gs[0, 0:2])
+sns.boxplot(ax=ax2,
+    data=matched_MF_EW, y="disease severity", x=x, hue="disease severity",
+    palette=[colors_severity["EW"], colors_severity["MF"]])
+ax2.set_xlabel("")
+ax2.set_ylabel("")
+ax2.set_xticks([])
+ax2.set_yticklabels(ax2.get_yticklabels(), 
+            fontweight="bold")
+
+plt.subplots_adjust(top=0.85, bottom=0.15, left=0.15, right=0.85)
+
+
+# plt.tight_layout()
+plt.show()
+```
+
+Select matched 
+
+
+## Peptide Selection for MRM-HR Panel
+
+```{python}
+pept_data = pept_data.loc[data["filename"]]
+pept_data = pept_data.astype(float)
+pept_data = np.log2(pept_data+1)
+pept_data = pept_data.replace({0.0:np.nan})
+pept_data = pept_data.loc[:, pept_data.columns.get_level_values("Protein.Group").isin(meta_table.index)]
+pept_data = pept_data.loc[:, pept_data.isna().mean() < 0.4]
+
+
+
+pept_data.to_csv(
+    os.path.join("data", "analysis", "loa", "pept_data_mrm.csv")
+)
+```
+
+
+```{python}
+matched_LN_INF = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_inf_ln_05.csv"), index_col=0)
+matched_LN_EW = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_ew_ln_05.csv"), index_col=0)
+matched_LN_MFEWMF = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_mfewmf_ln_05.csv"), index_col=0)
+matched_MF_EW = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_mf_ew_05.csv"), index_col=0)
+```
+
+
+
+
+## load limma results 
+
+Read in limma results from peptide comparisson
+```{python}
+limma_mf_ew_pept = pd.read_csv(os.path.join(res_path_tables, "dea_limma" ,"mf_ew_pept.csv"))
+limma_ln_mfewmf_pept = pd.read_csv(os.path.join(res_path_tables, "dea_limma", "ln_mfewmf_05_pept.csv"))
+limma_ln_inf_pept = pd.read_csv(os.path.join(res_path_tables, "dea_limma", "ln_infected_05_pept.csv"))
+```
+
+```{python}
+pept_data_onecollevel = pept_data.copy()
+pept_data_onecollevel.columns = pept_data.columns.get_level_values(0)
+```
+
+```{python}
+
+pept_data_meta = data[["Sample ID", "filename", "sex", "age", "disease severity", "LLmf"]].merge(pept_data_onecollevel, left_on="filename", right_index=True)
+```
+
+
+
+```{python}
+pept_sel = pd.read_excel(os.path.join("results", "loaloa", "review_1", "bestpept_selection_mrm.xlsx"))["Precursor"]
+
+pept_data_meta = pept_data_meta[["Sample ID", "filename", "sex", "age", "disease severity", "LLmf"] + list(pept_sel.values)]
+
+pept_data_meta = pept_data_meta[pept_data_meta["disease severity"].isin(["LN", "MF", "EWMF"])]
+
+
+pept_data_meta = pept_data_meta.dropna(subset= [
+    "TTPPVLDSDGSFFLYSR3", "SRWQEGNVFSC(UniMod:4)SVMHEALHNHYTQK4",
+    "C(UniMod:4)PAPELLGGPSVFLFPPKPK4", "LNLAFIANLFNR2", "VAPDEHPILLTEAPLNPK3", "VDWYQQR2"])
+
+```
+
+```{python}
+# MF vs LN 
+sample_pairs = [
+    "BDLL-P1090", "BDLL-P0037",
+    "BDLL-P0362", "BDLL-P1216",
+    "BDLL-P0559", "BDLL-P0356",
+    "BDLL-P0761", "BDLL-P1098", 
+    "BDLL-P0321", "BDLL-P1070", 
+    "BDLL-P1104", "BDLL-P0775", 
+    "BDLL-P0769", "BDLL-P1107", 
+    "BDLL-P0341", "BDLL-P1130",
+    "BDLL-P1060", "BDLL-P1080",
+    "BDLL-P0220", "BDLL-P0995",
+]
+```
+
+```{python}
+
+from scipy.stats import mannwhitneyu
+pept_data_meta_sel = pept_data_meta[pept_data_meta["Sample ID"].isin(sample_pairs)]
+
+pept_info = pept_data.columns.to_frame()
+for pept in pept_sel:
+    stat, p = mannwhitneyu(
+        pept_data_meta_sel.loc[pept_data_meta_sel["disease severity"]=="LN", pept],
+        pept_data_meta_sel.loc[pept_data_meta_sel["disease severity"]=="MF", pept], nan_policy="omit"
+    )
+
+    sns.boxplot(data=pept_data_meta_sel, x="disease severity", y=pept)
+    sns.stripplot(data=pept_data_meta_sel, x="disease severity", y=pept)
+    plt.ylabel(" ".join(pept_info.loc[pept_info["Precursor.Id"]==pept, ["Genes", "Precursor.Id"]].values[0]))
+    plt.title(f"p: {p:.5f}")
+    plt.show()
+```
+
+
+```{python}
+pept_data.loc[:, pept_data.columns.get_level_values("Genes").isin(["ACTBL2", "IGHG3", "IGHG4", "LCP1", "IGLV9-49"])].columns.to_frame().reset_index(drop=True).to_csv(os.path.join(
+    "results", "loaloa", "review_1", "20250316_mrm_peptides_loa.csv"))
+```
+
+
+```{python}
+pept_data_meta.loc[pept_data_meta["LLmf"]>300,["Sample ID", "sex", "age", "LLmf"]].dropna(subset=["LLmf", "age"]).sort_values(by=["sex", "age"]) # selection MF
+
+pept_data_meta.loc[
+    (pept_data_meta["disease severity"]=="LN") & 
+    (pept_data_meta["sex"]==1) & 
+    (pept_data_meta["age"]>62),["Sample ID", "sex", "age", "LLmf"]].dropna(subset=["age"]).sort_values(by="age") # selection LN
+
+```
+
+
+```{python}
+meta_measurement_loa = pd.read_excel(r"data\meta_measurement\20230719_AF_50-0127_metadata_Loaloa.xlsx")
+
+meta_measurement_loa = meta_measurement_loa.loc[meta_measurement_loa["Sample ID"].isin(sample_pairs), ["Sample ID", "Analysis.Plate", "Analysis.Row", "Analysis.Column", "Analysis.Plate96", "Analysis.Row96", "Analysis.Column96"]]
+```
+
+```{python}
+data_sel_mrm = data.loc[data["Sample ID"].isin(sample_pairs), ["Sample ID" ,"age", "sex", "infection", "filename"]]
+
+
+data_sel_mrm = data_sel_mrm.merge(meta_measurement_loa, left_on = "Sample ID", right_on = "Sample ID")
+data_sel_mrm = data_sel_mrm.set_index("Sample ID")
+data_sel_mrm = data_sel_mrm.loc[sample_pairs]
+data_sel_mrm["matched_samples"] = list(np.ravel([[i, i] for i in range(1,11)]))
+
+data_sel_mrm.to_csv(os.path.join(
+    "results", "loaloa", "review_1", "20250316_mrm_samples_loa.csv"))
+
+```
+
+## MRM Results
+
+DIA Discovery peptides
+
+```{python}
+pept_data = pd.read_table(os.path.join(
+    "data", "preprocessing_boris", "NTD_min1peptides","NTD_min1peptides_PrecursorQuantity_reprep_normalized.tsv"
+))
+
+pept_data = pept_data.iloc[2:]
+# 
+pept_data.columns = ["Precursor.Id", "Stripped.Sequence", "Protein.Group", "Genes"] + list(pept_data.columns)[4:] 
+pept_data=pept_data.T
+pept_data
+filenames = pept_data.index[4:]
+# multi_index = pd.MultiIndex.from_frame(pept_data.iloc[:4].T)
+# pept_data = pept_data.iloc[4:].reset_index(drop=True)
+# pept_data.columns = multi_index
+# pept_data.index = filenames
+pept_data.columns = pept_data.iloc[0]
+pept_data = pept_data.iloc[4:]
+pept_data
+```
+
+Correlation Discovery 
+
+```{python}
+pept_meta = data.loc[data["Sample ID"].isin(sample_pairs), ["Sample ID", "filename"]]
+
+pept_meta = pept_meta.merge(pept_data, left_on="filename", right_index=True)
+pept_meta = pept_meta.set_index("Sample ID")
+pept_meta.iloc[:, 2:] = np.log2(pept_meta.iloc[:, 2:].astype(float)+1)
+
+pept_meta.loc["BDLL-P0356", "SC(UniMod:4)DTPPPC(UniMod:4)PR2"] = 17.32595633004369
+pept_meta.loc["BDLL-P0321", "SC(UniMod:4)DTPPPC(UniMod:4)PR2"] = 20.09594558334798
+
+pept_meta.loc["BDLL-P0995", "VYALPEDLVEVNPK2"] = 10.13720330938363
+pept_meta.loc["BDLL-P1104", "VYALPEDLVEVNPK2"] = 11.36468185586456
+
+pept_meta.loc["BDLL-P1107", "VYALPEDLVEVNPK2"] = 10.689539934419718
+pept_meta.loc["BDLL-P0356", "VYALPEDLVEVNPK2"] = 11.553419112392382
+
+```
+
+pept_meta
+
+```{python}
+mrm_data = pd.read_csv(
+    "data/analysis/loa/20250411_export_MRM_skylineoutput_new.csv", index_col="Sample ID")
+
+mrm_data = mrm_data.dropna(subset="infection")
+
+# mrm_data = mrm_data[mrm_data["Type"]=="precursor"]
+mrm_data = mrm_data[mrm_data["Type"]=="sum_fragment"]
+
+mrm_data["Area_log2"] = np.log2(mrm_data["Area"]+1)
+
+stat_results = pd.DataFrame(columns=["gene", "p"], index=mrm_data["Precursor"].unique())
+
+
+np.round(mrm_data.groupby("sex")["infection"].value_counts(normalize=True),2)
+```
+
+
+```{python}
+mrm_precursor = ["VDWYQQR_2", "SCDTPPPCPR_3", "TYTCNVDHKPSNTK_4", "VYALPEDLVEVNPK_3", "VAPDEHPILLTEAPLNPK_3"]
+dia_precursor = ["VDWYQQR2", "SC(UniMod:4)DTPPPC(UniMod:4)PR2", "TYTC(UniMod:4)NVDHKPSNTK3", "VYALPEDLVEVNPK2"]
+
+genes = ["IGHG4", "IGLV9-49", "IGHG3", "ACTBL2", "LCP1"]
+
+mrm_precursor = [
+    "TYTCNVDHKPSNTK_4", "VGTGGIVGSK_1", "SCDTPPPCPR_2", "VAPDEHPILLTEAPLNPK_3", 
+    "VYALPEDLVEVNPK_3"]
+
+dia_precursor = [
+    "YGPPC(UniMod:4)PSC(UniMod:4)PAPEFLGGPSVFLFPPKPK4", 
+    "VGTGGIVGSK2", "SC(UniMod:4)DTPPPC(UniMod:4)PR2", "VAPDEHPILLTEAPLNPK3",
+    "VYALPEDLVEVNPK2"]
+
+for pre in range(5):
+    data_corr_p = pd.concat(
+        [
+            mrm_data.loc[mrm_data["Precursor"]==mrm_precursor[pre], ["Area_log2", "infection"]],
+            pept_meta[dia_precursor[pre]]
+        ], axis=1)
+
+    data_corr_p = data_corr_p.replace(0, np.nan)
+    data_corr_p = data_corr_p.dropna(subset=[dia_precursor[pre]])
+    m,b = np.polyfit(data_corr_p.loc[:, dia_precursor[pre]].astype(float), data_corr_p.loc[:, "Area_log2"].values,deg=1)
+
+    s_rho, p = spearmanr(
+        data_corr_p["Area_log2"], data_corr_p[dia_precursor[pre]], nan_policy="omit"
+    )
+
+    fig, ax = plt.subplots(1,1, figsize=(4,4))
+    ax.plot(
+        data_corr_p.loc[:, dia_precursor[pre]].astype(float), 
+        m*data_corr_p.loc[:, dia_precursor[pre]].astype(float).values+b, lw=1, c="k", ls="--")
+    sns.scatterplot(
+        ax=ax, data=data_corr_p, x=dia_precursor[pre], 
+        y="Area_log2", hue="infection", hue_order = ["LN", "INF"], palette=[colors_infection["LN"], colors_infection["INF"]], legend=False)
+    ax.set_title("$s_{rho}$ "+ f"{s_rho:.2f}, p: {p:.2e}")
+    
+    x_lim = ax.get_xlim()
+    y_lim = ax.get_ylim()
+    ax.set_xlim(x_lim)
+    ax.set_ylim(y_lim)
+    fig.suptitle(genes[pre], fontweight="bold")
+
+
+        
+    ax.set_xlabel("$\\mathbf{log_{2}}$ " + "Abund. Discovery", fontweight="bold")
+    ax.set_ylabel("$\\mathbf{log_{2}}$ " + "Abund. Validation", fontweight="bold")
+    ax.grid()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        "results", "loaloa", "review_1", "mrm_panel", f"corr_{genes[pre]}.png"
+    ), dpi=400)
+    plt.show()
+```
+
+Bland - Altman - Plots 
+
+```{python}
+def bland_altman_plot(data1, data2, hue, title):
+    data1     = np.asarray(data1)
+    data2     = np.asarray(data2)
+    mean_vals = np.median([data1, data2], axis=0)
+    median      = np.median([data1, data2], axis=0)
+    diff      = data1 - data2 
+       
+    median_diff = np.median(diff)
+    diff = diff - median_diff
+    median = 0
+
+    lower_limit = np.percentile(diff, 2.5)
+    upper_limit = np.percentile(diff, 97.5)
+
+    print(len(mean_vals))
+    
+    for i in range(len(diff)):
+        c = colors_infection["LN"] if  hue[i] =="LN" else colors_infection["INF"]
+        plt.scatter(mean_vals[i], diff[i], color=c)
+    plt.axhline(median, color='gray', linestyle='--', label='Median Diff.')
+    plt.axhline(lower_limit, color='red', linestyle='--', label='2.5th percentile')
+    plt.axhline(upper_limit, color='red', linestyle='--', label='97.5th percentile')
+    plt.ylabel("Median Difference (Discovery - Validation) - shifted", fontweight="bold")
+    plt.xlabel("Median (Discovery, Validation)", fontweight="bold")
+    plt.title(title, fontweight="bold")
+    plt.legend()
+    plt.ylim([-3.2, 1.7])
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        "results", "loaloa", "review_1", "mrm_panel", f"BA_{title}_medianshift_limits.png"
+    ), dpi=400)
+    plt.show()
+
+
+for pre in range(5):
+    data_corr_p = pd.concat(
+        [
+            mrm_data.loc[
+                mrm_data["Precursor"]==mrm_precursor[pre], 
+                ["Area_log2", "infection"]],
+            pept_meta[dia_precursor[pre]]
+        ], axis=1)
+    data_corr_p = data_corr_p.replace(0, np.nan)
+    data_corr_p = data_corr_p.dropna(subset=[dia_precursor[pre]])
+
+    bland_altman_plot(
+        data_corr_p[dia_precursor[pre]], 
+        data_corr_p["Area_log2"],
+        data_corr_p["infection"],
+        genes[pre])   
+    
+```
+
+Correlation MRM vs DIA ZenoTof
+
+```{python}
+pept_data_zeno = pd.read_csv(
+    "data/analysis/loa/report_dia_validation.tsv", sep="\t")
+```
+
+No peptide found for ACTBL2
+
+```{python}
+pept_data_zeno[pept_data_zeno["Genes"]=="IGHG3"]["Stripped.Sequence"].drop_duplicates()
+```
+
+mrm_precursor = [
+    "TYTCNVDHKPSNTK_4", "VGTGGIVGSK_1", "SCDTPPPCPR_2", "VAPDEHPILLTEAPLNPK_3", 
+    "VYALPEDLVEVNPK_3"]
+
+```{python}
+precursor_ids_zenoDIA = [
+    "TYTC(UniMod:4)NVDHKPSNTK4",
+    "VGTGGIVGSK2",
+    'SC(UniMod:4)DTPPPC(UniMod:4)PR2',
+    "",
+    "VYALPEDLVEVNPK2"
+
+]
+``` 
+
+```{python}
+pept_data_zeno[pept_data_zeno["Stripped.Sequence"]=="VYALPEDLVEVNPK"]
+```
+
+MRM Panel Boxplots
+
+```{python}
+for gene in mrm_data["Genes"].unique():
+    mrm_g = mrm_data[mrm_data["Genes"]==gene]
+
+    print(gene)
+
+    for pre in mrm_g["Precursor"].unique():
+        mrm_g_p = mrm_g[mrm_g["Precursor"]==pre]
+
+        _, p = mannwhitneyu(
+            mrm_g_p[mrm_g_p["infection"]=="INF"]["Area_log2"],
+            mrm_g_p[mrm_g_p["infection"]=="LN"]["Area_log2"]
+        )
+        stat_results.loc[pre, "p"] = p
+        stat_results.loc[pre, "gene"] = gene
+        fig, ax = plt.subplots(1,1, figsize=(2,3))
+        sns.boxplot(
+            ax=ax, data=mrm_g_p, x="infection", y="Area_log2",
+             fill=False, palette=[colors_infection["LN"], colors_infection["INF"]], order=["LN", "INF"],
+             fliersize=0
+        )
+        sns.stripplot(
+            ax=ax, data=mrm_g_p, x="infection", y="Area_log2",
+            palette=[colors_infection["LN"], colors_infection["INF"]], order=["LN", "INF"]
+        )
+        ax.set_ylabel("$\\mathbf{log_{2}}$" + " area "+ f"{gene}\n{pre.split('_')[0]}", fontweight="bold")
+        ax.set_xlabel(f"")
+        ax.set_yticklabels(ax.get_yticklabels(), 
+            fontweight="bold")
+        ax.set_xticklabels(ax.get_xticklabels(), 
+            fontweight="bold")
+        ax.grid()
+# ax0.legend()
+        plt.title(f"p: {p:.2e}")
+        plt.tight_layout()
+        plt.savefig(f"results/loaloa/review_1/mrm_panel/{gene}_{pre}{'_signif' if p < 0.05 else ''}.png", dpi=300)
+
+        # plt.close()
+        # break
+    # break
+```
+
+We check whether the discovery data RT anntoation for DIA-NN was correct by using the -vis command in DIA-NN and checking the TIC.
+
+```{python}
+filenames_mrm_samples = data[data["Sample ID"].isin(sample_pairs)]["filename"]
+
+file_path = "/s-mcpb-ms03/union/is/PRO3/Data/50-0127/"
+file_paths_disc = filenames_mrm_samples.values
+file_paths_disc = ["--f " + file_path + fn + ".d" for fn in filenames_mrm_samples]
+file_paths_disc = pd.Series(file_paths_disc).drop_duplicates().to_list()
+
+#write  file
+with open(os.path.join("data", "cfg", "20250415_loa_mrm_tic.cfg"), "w") as f:
+    for fn in file_paths_disc:
+        f.write(fn+"\n")
+```
+
+
+
+## OSPP in LOA
+
+```{python}
+data_ospp_long = pd.read_table(os.path.join(
+    "data", "diann_output_reports", "cldi10@20250311+1200_50-0127_LoaLabeledPeptidesDiogenes", "report_osppRatio.tsv"
+))
+data_ospp_long["features"] = data_ospp_long["Genes"] + ":" + data_ospp_long["Stripped.Sequence"]+data_ospp_long["Precursor.Charge"].astype(str) 
+
+data_ospp_long["Sample.Type"] = "biological"
+data_ospp_long.loc[
+    data_ospp_long["Run"].str.contains("BSA-Cal"), "Sample.Type"] = "Cal"
+data_ospp_long.loc[
+    data_ospp_long["Run"].str.contains("QC-Cal"), "Sample.Type"] = "Cal.QC"
+data_ospp_long.loc[
+    data_ospp_long["Run"].str.contains("QC-\d{3}"), "Sample.Type"] = "QC"
+data_ospp_long = data_ospp_long.sort_values(
+    by=["Genes" ,"Stripped.Sequence", "Precursor.Charge"])
+data_ospp_long_qc = data_ospp_long[data_ospp_long["Sample.Type"]=="QC"]
+data_ospp_long_bio = data_ospp_long[data_ospp_long["Sample.Type"]=="biological"]
+data_ospp_long_cal = data_ospp_long[data_ospp_long["Sample.Type"]=="Cal"]
+data_ospp_long_calqc = data_ospp_long[data_ospp_long["Sample.Type"]=="Cal.QC"]
+
+features = data_ospp_long["features"].unique()
+
+data_ospp = data_ospp_long.pivot(index ="Run", columns="features", values="ratio")
+data_ospp_qc = data_ospp_long_qc.pivot(index ="Run", columns="features", values="ratio")
+data_ospp_bio = data_ospp_long_bio.pivot(index ="Run", columns="features", values="ratio")
+data_ospp_cal = data_ospp_long_cal.pivot(index ="Run", columns="features", values="ratio")
+data_ospp_calqc = data_ospp_long_calqc.pivot(index ="Run", columns="features", values="ratio")
+```
+
+```{python}
+data_ospp_qc = data_ospp_long_qc.pivot(index ="Run", columns="features", values="ratio")
+
+# data_ospp_qc.isna().mean().hist()
+# filter qc samples with less than 2/3 % completeness, 4 qc excluded
+data_ospp_qc = data_ospp_qc.loc[data_ospp_qc.isna().mean(axis=1)<2/3, :]
+# filter features with less than 66& completen, 67 precursor excluded
+data_ospp_qc = data_ospp_qc.loc[:, data_ospp_qc.isna().mean()<1/3]
+features_filt = data_ospp_qc.columns
+```
+
+```{python}
+# Update Dataframes
+data_ospp = data_ospp[features_filt]
+data_ospp_qc = data_ospp_qc[features_filt]
+data_ospp_bio = data_ospp_bio[features_filt]
+data_ospp_cal = data_ospp_cal[features_filt]
+data_ospp_calqc = data_ospp_calqc[features_filt]
+
+data_ospp_long = data_ospp_long[data_ospp_long["features"].isin(features_filt)]
+data_ospp_long_qc = data_ospp_long_qc[data_ospp_long_qc["features"].isin(features_filt)]
+data_ospp_long_bio = data_ospp_long_bio[data_ospp_long_bio["features"].isin(features_filt)]
+data_ospp_long_cal = data_ospp_long_cal[data_ospp_long_cal["features"].isin(features_filt)]
+data_ospp_long_calqc = data_ospp_long_calqc[data_ospp_long_calqc["features"].isin(features_filt)]
+```
+
+
+
+```{python}
+# Plot Distributions of features in Pools
+
+for feat in features_selected:
+    fig, axs = plt.subplots(1,3)
+    sns.kdeplot(
+        ax=axs[0],
+        data=data_ospp,
+        x=feat, c="k")
+    sns.kdeplot(
+        ax=axs[1],
+        data=data_ospp_bio,
+        x=feat, c="gray")
+    sns.kdeplot(
+        ax=axs[2],
+        data=data_ospp_qc,
+        x=feat, c="tab:blue")
+    axs[0].set_title("All")
+    axs[1].set_title("Study")
+    axs[2].set_title("Pool QC")
+    for ax in axs:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    fig.supxlabel(feat)
+    fig.supylabel("Density")
+    plt.tight_layout()
+    
+    plt.savefig(os.path.join(
+        res_path_plots, "OSPP", "distributions", f'distr_{feat.replace(":","-")}.png'))
+
+
+```
+
+```{python}
+peptide_meta = data_ospp_long[["Genes", "Stripped.Sequence", "Precursor.Charge", "features"]].drop_duplicates()
+peptide_meta= peptide_meta.sort_values(
+    by=["Genes" ,"Stripped.Sequence", "Precursor.Charge"])
+
+
+def coef_of_variation(data):
+    median_value = np.nanmedian(data)
+    
+    # Calculate MAD
+    mad = np.nanmedian(np.abs(data - median_value))
+    
+    # Calculate CV as (MAD / Median) * 100
+    cv = (mad / median_value) * 100
+    return cv
+
+cv_all = data_ospp.apply(lambda col: coef_of_variation(col), axis=0)
+cv_bio = data_ospp_bio.apply(lambda col: coef_of_variation(col), axis=0)
+cv_qc = data_ospp_qc.apply(lambda col: coef_of_variation(col), axis=0)
+
+med_abund_all = data_ospp.median()
+med_abund_bio = data_ospp_bio.median()
+med_abund_qc = data_ospp_qc.median()
+
+
+# pd.DataFrame({
+#     "cv_all":cv_all, "cv_qc":cv_qc, "cv_bio":cv_bio,
+#     "mvr_all": data_ospp.isna().mean(),
+#     "mvr_bio": data_ospp_bio.isna().mean(),
+#     "mvr_qc": data_ospp_qc.isna().mean(),
+#     "medAbund_all":med_abund_all, 
+#     "medAbund_bio":med_abund_bio,
+#     "medAbund_qc":med_abund_qc
+# }).to_csv(
+#     os.path.join(res_path_tables, "OSPP", "diagnostics_peptides.csv")
+# )
+
+```
+
+
+```{python}
+meta_ospp_sel = pd.read_csv(
+    os.path.join(res_path_tables, "OSPP", "diagnostics_peptides_selection.csv"),
+    index_col=0
+)
+
+meta_ospp_sel = meta_ospp_sel[meta_ospp_sel["Selected"]==True]
+features_selected = meta_ospp_sel.index
+
+```
+
+```{python}
+data_ospp_cal["cal_index"] = [int(x.split("-")[-1]) for x in data_ospp_cal.index]
+fig, ax = plt.subplots(1,1, figsize=(5,30))
+sns.heatmap(
+    data_ospp_cal.groupby("cal_index")[features_selected].apply(lambda x: x.isna().mean()).T,
+    linewidths=0.00)
+```
+
+Extract Calibration Curves
+```{python}
+
+data_ospp_cal_log10 = np.log10(data_ospp_cal)
+data_ospp_cal_log10["cal_index"] = [int(x.split("-")[-1]) for x in data_ospp_cal.index]
+
+for feat in features_selected:
+    fig, ax = plt.subplots(1,1)
+    sns.boxplot(ax=ax,
+        data=data_ospp_cal_log10,
+        x="cal_index", legend=False,
+        y=feat, fill=False, fliersize=0
+    )
+    sns.stripplot(ax=ax,
+        data=data_ospp_cal_log10,
+        x="cal_index", legend=False,
+        y=feat, alpha=0.5, c="k"
+    )
+
+    # add calibration fit
+    m, b = np.polyfit(
+        y=data_ospp_cal_log10.groupby("cal_index")[feat].median().iloc[1:7].values, 
+        x=range(1,7), deg=1)
+    ax.plot(m * range(0,10) +b, c="gray", ls="--", label=f"y={m:.2f}*x+{b:.2f} ")
+
+    sns.boxplot(ax=ax,
+        data=np.log10(data_ospp_bio),
+        y=feat, x=9 , fill=False, legend=False,
+    )
+    sns.stripplot(ax=ax,
+        data=np.log10(data_ospp_bio), legend=False,
+        y=feat, x=9 ,alpha=0.5, c="k", dodge=True
+    )
+    sns.boxplot(ax=ax,
+        data=np.log10(data_ospp_qc),
+        y=feat, x=10 , fill=False, legend=False,
+    )
+    sns.stripplot(ax=ax,
+        data=np.log10(data_ospp_qc), legend=False,
+        y=feat, x=10 ,alpha=0.5, c="k", dodge=True
+    )
+    plt.ylabel(f"-log10 {feat}")
+    plt.xlabel(f"Spiked Standard in ng/µl")
+    ax.set_xticklabels(["2700","900","300","90","30","9","3","0"]+[ "Samples", "Pools"])
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(
+            res_path_plots, "OSPP" ,"dilution_series", f'dilution_{feat.replace(":","-")}.png'
+        )
+    )
+    plt.close()
+```
+
+
+
+```{python}
+for feat in features_selected:
+    fig, axs = plt.subplots(1,3)
+    sns.kdeplot(
+        ax=axs[0],
+        data=data_ospp_norm,
+        x=feat, c="k")
+    sns.kdeplot(
+        ax=axs[1],
+        data=data_ospp_bio_norm,
+        x=feat, c="gray")
+    sns.kdeplot(
+        ax=axs[2],
+        data=data_ospp_qc_norm,
+        x=feat, c="tab:blue")
+    axs[0].set_title("All")
+    axs[1].set_title("Study")
+    axs[2].set_title("Pool QC")
+    for ax in axs:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    fig.supxlabel(feat)
+    fig.supylabel("Density")
+    plt.tight_layout()
+    
+    plt.savefig(os.path.join(
+        res_path_plots, "OSPP", "distributions", f'distr_{feat.replace(":","-")}_norm.png'))
+
+```
+
+```{python}
+data_ospp_cal_norm_log10 = -np.log10(data_ospp_cal_norm)
+data_ospp_cal_norm_log10["cal_index"] = [int(x.split("-")[-1]) for x in data_ospp_cal_norm.index]
+
+for feat in features_selected:
+    fig, ax = plt.subplots(1,1)
+    sns.boxplot(ax=ax,
+        data=data_ospp_cal_norm_log10,
+        x="cal_index", legend=False,
+        y=feat, fill=False, fliersize=0
+    )
+    sns.stripplot(ax=ax,
+        data=data_ospp_cal_norm_log10,
+        x="cal_index", legend=False,
+        y=feat, alpha=0.5, c="k"
+    )
+
+    # add calibration fit
+    m, b = np.polyfit(
+        y=data_ospp_cal_norm_log10.groupby("cal_index")[feat].median().iloc[1:7].values, 
+        x=range(1,7), deg=1)
+    ax.plot(m * range(0,10) +b, c="gray", ls="--", label=f"y={m:.2f}*x+{b:.2f} ")
+
+    sns.boxplot(ax=ax,
+        data=-np.log10(data_ospp_bio_norm),
+        y=feat, x=9 , fill=False, legend=False,
+    )
+    sns.stripplot(ax=ax,
+        data=-np.log10(data_ospp_bio_norm), legend=False,
+        y=feat, x=9 ,alpha=0.5, c="k", dodge=True
+    )
+    sns.boxplot(ax=ax,
+        data=-np.log10(data_ospp_qc_norm),
+        y=feat, x=10 , fill=False, legend=False,
+    )
+    sns.stripplot(ax=ax,
+        data=-np.log10(data_ospp_qc_norm), legend=False,
+        y=feat, x=10 ,alpha=0.5, c="k", dodge=True
+    )
+    plt.ylabel(f"-log10 {feat}")
+    plt.xlabel(f"Dilution Step")
+    ax.set_xticklabels(["1","2","3","4","5","6","7","8", "Samples", "Pools"])
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(
+            res_path_plots, "OSPP" ,"dilution_series", f'dilution_{feat.replace(":","-")}_norm.png'
+        )
+    )
+    plt.close()
+```
+
+
+
+
+## PCA Color by Curve step
+
+Heatmap missingness calibration curves,
+probably some peptides are not detected at the lower end 
+
+```{python}
+# PCA Calibration
+
+features_pca = features_selected
+
+data_pca = data_ospp_cal
+
+data_pca = pd.DataFrame(
+    KNNImputer().fit_transform(data_pca), index=data_pca.index,
+    columns=data_pca.columns)
+
+pca_data, pca_var, pca_loadings = perform_pca(
+    data_pca[features_pca], n_components=20)
+
+pca_data = pd.DataFrame(pca_data, index=data_pca.index)
+
+pca_data["cal_index"] = [int(x.split("-")[-1]) for x in data_ospp_cal.index]
+
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="cal_index", 
+    annot=None, target_groups=range(1,9), show_arrows=True,
+    target_colors=sns.color_palette("tab10"), 
+    save_path=None, add_info="Calibration", show_legend=True)
+plot_pca(
+    pca_data.drop("20230602_PRO3_AF_000_50-0127_Loaloa-384_P00_BSA-Cal-1"), pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="cal_index", 
+    annot=None, target_groups=range(1,9), show_arrows=True,
+    target_colors=sns.color_palette("tab10"), 
+    save_path=None, add_info="Calibration", show_legend=True)
+
+
+data_ospp_cal = data_ospp_cal.drop(
+    "20230602_PRO3_AF_000_50-0127_Loaloa-384_P00_BSA-Cal-1")
+
+```
+
+
+```{python}
+# PCA Biological samples and qcs
+features_pca = features_selected
+
+outlier_samples_first_pca = ['20230605_PRO3_AF_846_50-0127_Loaloa-384_P00_QC-044',
+       '20230605_PRO3_AF_846_50-0127_Loaloa-384_P00_QC-045',
+       '20230605_PRO3_AF_846_50-0127_Loaloa-384_P00_QC-046',
+       '20230608_PRO3_AF_549_50-0127_Loaloa-384_P00_QC-000',
+       '20230608_PRO3_AF_550_50-0127_Loaloa-384_P00_QC-001',
+       '20230608_PRO3_AF_551_50-0127_Loaloa-384_P00_QC-002']
+
+data_ospp_qc = data_ospp_qc.drop(outlier_samples_first_pca)
+
+data_pca = pd.concat([
+    data_ospp_bio,
+    data_ospp_qc
+])
+
+data_pca = pd.DataFrame(
+    KNNImputer().fit_transform(data_pca), index=data_pca.index,
+    columns=data_pca.columns)
+
+pca_data, pca_var, pca_loadings = perform_pca(
+    data_pca[features_pca], n_components=20)
+
+pca_data = pd.DataFrame(pca_data, index=data_pca.index)
+
+pca_data["Sample.Type"] = ["Study"]*data_ospp_bio.shape[0] + ["Pool"]*data_ospp_qc.shape[0]
+pca_data["Median Exp"] = list(data_ospp_bio.median(axis=1)) + list(data_ospp_qc.median(axis=1))
+pca_data["Inj.Number"] = [x.split("_")[3] for x in data_pca.index]
+pca_data["MS.Date"] = [x.split("_")[0] for x in data_pca.index]
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="Sample.Type", 
+    annot=None, target_groups=["Study", "Pool"], show_arrows=True,
+    target_colors=["gray", "tab:blue"], 
+    save_path=None, add_info="Calibration", show_legend=True)
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=1, pc_y=2, alpha=0.9, show_plot=True,  target="Sample.Type", 
+    annot=None, target_groups=["Study", "Pool"], show_arrows=True,
+    target_colors=["gray", "tab:blue"], 
+    save_path=None, add_info="Calibration", show_legend=True)
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=1, pc_y=2, alpha=0.9, show_plot=True,  target="MS.Date", 
+    annot=None, target_groups=None, show_arrows=True,
+    target_colors=sns.color_palette("tab10"), 
+    save_path=None, add_info="Calibration", show_legend=True)
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="Inj.Number", 
+    annot=None, target_groups=None, show_arrows=True,
+    target_colors=sns.color_palette("Greens"), 
+    save_path=None, add_info="Calibration", show_legend=False)
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="Median Exp", 
+    annot=None, target_groups=None, show_arrows=True,
+    target_colors=sns.color_palette("Reds"), 
+    save_path=None, add_info="Calibration", show_legend=False)
+```
+
+## Differential Expression Analysis
+
+```{python}
+# data = data.set_index("filename")
+data = data.loc[data_ospp_bio.index]
+```
+
+```{python}
+features_pca = features_selected
+data_pca = data_ospp_bio
+
+data_pca = pd.DataFrame(
+    KNNImputer().fit_transform(data_pca), index=data_pca.index,
+    columns=data_pca.columns)
+
+pca_data, pca_var, pca_loadings = perform_pca(
+    data_pca[features_pca], n_components=20)
+
+pca_data = pd.DataFrame(pca_data, index=data_pca.index)
+
+pca_data["disease severity"] = data["disease severity"]
+pca_data["infection"] = data["infection"]
+
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=0, pc_y=1, alpha=0.9, show_plot=True,  target="infection", 
+    annot=None, target_groups=None, show_arrows=True,
+    target_colors=[colors_infection["LN"], colors_infection["INF"]], 
+    save_path=None, add_info="Infection", show_legend=False)
+
+idx_ln_mf = data[data["disease severity"].isin(["LN", "MF", "EWMF"])].index
+data_pca = data_ospp_bio.loc[idx_ln_mf]
+
+data_pca = pd.DataFrame(
+    KNNImputer().fit_transform(data_pca), index=data_pca.index,
+    columns=data_pca.columns)
+
+pca_data, pca_var, pca_loadings = perform_pca(
+    data_pca[features_pca], n_components=20)
+
+pca_data = pd.DataFrame(pca_data, index=data_pca.index)
+
+pca_data["disease severity"] = data["disease severity"].loc[idx_ln_mf]
+pca_data["infection"] = data["infection"].loc[idx_ln_mf]
+
+plot_pca(
+    pca_data, pca_var, pca_loadings, features_pca, 
+    pc_x=1, pc_y=2, alpha=0.9, show_plot=True,  target="infection", 
+    annot=None, target_groups=None, show_arrows=True,
+    target_colors=[colors_infection["LN"], colors_infection["INF"]], 
+    save_path=None, add_info="Infection", show_legend=False)
+```
+
+```{python}
+d
+```
+
+Export data for limma anlysis
+
+```{python}
+
+
+data_ospp_bio_log2 = np.log2(data_ospp_bio[features_selected]+1)
+data_ospp_bio_log2.to_csv(
+    os.path.join("data", "analysis", "loa", "loa_data_05_ospp.csv")
+)
+
+```
+
+
+```{python}
+order = ["LN", "EW", "EWMF", "MF"]
+colors = [colors_severity[g] for g in order]
+
+data_ospp_bio_log2["disease severity"] = data["disease severity"]
+
+for p in features_selected:  
+
+    fig, ax = plt.subplots(1,1, figsize=(5, 5))
+    sns.boxplot(ax=ax,
+        data=data_ospp_bio_log2, y=p, x="disease severity", order=order,
+        fill=False, fliersize=0, palette=colors)
+    sns.stripplot(ax=ax,
+        data=data_ospp_bio_log2, y=p, x="disease severity", order=order,
+        palette=colors, edgecolor="gray", linewidth=1, alpha=.2)
+    ax.set_ylabel("$\\mathbf{log_2}$ h/l ratio", 
+            fontweight="bold")
+    ax.set_xlabel("")
+    ax.set_xticklabels(order, fontweight="bold")
+    ax.set_yticklabels(ax.get_yticklabels(), fontweight="bold")
+    ax.set_title(p, fontweight="bold")
+    ax.grid()
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        res_path_plots, "OSPP",  "boxplots", f'{p.replace(":","-")}.png'),
+        dpi=400
+    )
+    plt.close()
+```
+
+
+Boxplots for OSPP Stnadard in EW and MF - and EW and LN Group
+```{python}
+
+matched_LN_INF = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_inf_ln_05.csv"), index_col=2)
+matched_LN_EW = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_ew_ln_05.csv"), index_col=2)
+matched_LN_MFEWMF = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_mfewmf_ln_05.csv"), index_col=2)
+matched_MF_EW = pd.read_csv(os.path.join(
+    "data", "analysis", "loa", "matched", "data_matched_mf_ew_05.csv"), index_col=2)
+
+```
+
+EW vs MF
+```{python}
+data_ospp_log10 = np.log10(data_ospp_bio[features_selected])
+
+matched_LN_EW_ospp = matched_LN_EW.merge(
+    data_ospp_log10, right_index=True, left_index=True)
+
+
+for feat in [
+    "IGHG3:WYVDGVEVHNAK2",
+    "CD5L:IWLDNVR2",
+    "IGHM:NVPLPVIAELPPK2",
+    "SHBG:IALGGLLFPASNLR2",
+    "SERPINA7:GWVDLFVPK2"]:
+    fig, ax = plt.subplots(1,1, figsize=(2,4))
+    sns.boxplot(
+        data = matched_LN_EW_ospp,
+        x="disease severity", y=feat,
+        palette=[colors_severity["EW"], colors_severity["LN"]], fill=False
+    )
+    sns.stripplot(
+        data = matched_LN_EW_ospp,
+        x="disease severity", y=feat,
+        palette=[colors_severity["EW"], colors_severity["LN"]]
+    )
+    ax.set_ylabel(f"log10 {feat}")
+```
+
+EW vs LN
+
+```{python}
+data_ospp_log10 = np.log10(data_ospp_bio[features_selected])
+
+matched_LN_EW_ospp = matched_MF_EW.merge(
+    data_ospp_log10, right_index=True, left_index=True)
+
+
+for feat in [
+    "IGHG4:GLPSSIEK2",
+    "ACTB:EITALAPSTMK2"]:
+    fig, ax = plt.subplots(1,1, figsize=(2,4))
+    sns.boxplot(
+        data = matched_MF_EW_ospp,
+        x="disease severity", y=feat,
+        palette=[colors_severity["EW"], colors_severity["MF"]], fill=False
+    )
+    sns.stripplot(
+        data = matched_MF_EW_ospp,
+        x="disease severity", y=feat,
+        palette=[colors_severity["EW"], colors_severity["MF"]]
+    )
+    ax.set_ylabel(f"log10 {feat}")
+```
+s
