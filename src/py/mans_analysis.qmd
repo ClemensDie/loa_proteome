@@ -453,33 +453,6 @@ def optimize_clf_with_loocv(
         scores.append(score)
     print("Run Finished")
     return best_params, best_score, scores, param_values
-
-
-def egfr_ckd_epi_2021_df(df, scr_col="scr", age_col="age", sex_col="sex_m", out_col="eGFR"):
-    df = df.copy()
-
-    sex = df[sex_col].astype(str)
-    female = sex.isin(["F"])
-    male = sex.isin(["M"])
-    if not (female | male).all():
-        bad = df.loc[~(female | male), sex_col].unique()
-        raise ValueError(f"Unrecognized sex values: {bad}")
-
-    kappa = np.where(female, 0.7, 0.9)
-    alpha = np.where(female, -0.241, -0.302)
-    sex_factor = np.where(female, 1.012, 1.0)
-
-    ratio = df[scr_col] / kappas
-
-    df[out_col] = (
-        142
-        * np.minimum(ratio, 1) ** alpha
-        * np.maximum(ratio, 1) ** -1.200
-        * (0.9938 ** df[age_col])
-        * sex_factor
-    )
-    return df
-
 ```
 
 ## Data Import
@@ -724,6 +697,37 @@ df = data_mans[data_mans["severity"].isin(groups_sel)]
 
 ```
 
+
+PCR Data shows some inconsistencies with original group annotations. 
+
+Remove inconclusive Cases from analysis
+
+Cohort Statistics for subspecies Level
+
+```{python}
+
+df[["Mansonella FRET Assay", "severity", "mp_mf"]]
+
+cond_ctrl = (df["mp_mf"]==0) & (df["severity"]=="CTRL") & (df["Mansonella FRET Assay"]=="Negative")
+cond_mp = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="perstans")
+cond_deux = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX")
+cond_mix = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX+perstans")
+
+df["severity_pcr"] = "Inconclusive"
+df.loc[cond_ctrl, "severity_pcr"] = "negative" 
+df.loc[cond_mp, "severity_pcr"] = "MP" 
+df.loc[cond_deux, "severity_pcr"] = "MD" 
+df.loc[cond_mix, "severity_pcr"] = "MDandMP" 
+
+
+```
+
+
+```{python}
+df.to_csv(
+    os.path.join("results", "mansonella", "20260706_data_mp_selection.csv")
+)
+```
 
 ## Cohort Statistics
 
@@ -1138,698 +1142,676 @@ results_severity.to_csv(
 # # 1. Load and filter data
 # # ---------------------
 
-# random_state=20250811
-# df = data_mans[data_mans["severity"].isin(groups_sel)]
+random_state=20250811
+df = data_mans[data_mans["severity"].isin(groups_sel)]
 
 
-# # only features with 100% completeness considered
-# missingness = df[meta_table.index].isna().mean()
-# low_missing_proteins = missingness[missingness <= 0.2].index
-# features_ml = list(set(low_missing_proteins) & set(meta_table.index))
+# only features with 100% completeness considered
+missingness = df[meta_table.index].isna().mean()
+low_missing_proteins = missingness[missingness <= 0.2].index
+features_ml = list(set(low_missing_proteins) & set(meta_table.index))
 
-# # Filter only relevant classes
-# df_filtered = df[df['severity'].isin(['M', 'CTRL'])].copy().dropna(subset="age") 
+# Filter only relevant classes
+df_filtered = df[df['severity'].isin(['M', 'CTRL'])].copy().dropna(subset="age") 
 
-# df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==0)].sample(27, random_state=42).index, inplace=True)
-# df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==1)].sample(17, random_state=42).index, inplace=True)
+df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==0)].sample(27, random_state=42).index, inplace=True)
+df_filtered.drop(df_filtered[(df_filtered["severity"]=="CTRL") &  (df_filtered["sex"]==1)].sample(17, random_state=42).index, inplace=True)
 
-# df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
+df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
 
-# df_filtered_prot = pd.DataFrame(
-#     KNNImputer().fit_transform(df_filtered[features_ml]),
-#     index=df_filtered.index,
-#     columns=features_ml,
-#     )
-# df_filtered = pd.concat(
-#     [df_filtered[["age", "sex", "severity",]], # "severity_combined"
-#     df_filtered_prot], axis=1)
+df_filtered_prot = pd.DataFrame(
+    KNNImputer().fit_transform(df_filtered[features_ml]),
+    index=df_filtered.index,
+    columns=features_ml,
+    )
+df_filtered = pd.concat(
+    [df_filtered[["age", "sex", "severity",]], # "severity_combined"
+    df_filtered_prot], axis=1)
 
-# # ---------------------
-# # 2. Define Test Set
-# # ---------------------
+# ---------------------
+# 2. Define Test Set
+# ---------------------
 
-# test_df = (
-#     df_filtered.groupby('severity', group_keys=False)
-#     .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
-# )
+test_df = (
+    df_filtered.groupby('severity', group_keys=False)
+    .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
+)
 
-# # Remaining data is training set
-# train_df = df_filtered.drop(index=test_df.index)
+# Remaining data is training set
+train_df = df_filtered.drop(index=test_df.index)
 
-# # ---------------------
-# # 3. Balance sample sizes in training data
-# # ---------------------
-# min_count = train_df['severity'].value_counts().min()
-# balanced_train_df = (
-#     train_df.groupby('severity', group_keys=False)
-#     .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
-# )
+# ---------------------
+# 3. Balance sample sizes in training data
+# ---------------------
+min_count = train_df['severity'].value_counts().min()
+balanced_train_df = (
+    train_df.groupby('severity', group_keys=False)
+    .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
+)
 
-# res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
-# for p in features_ml:
-#     res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="M", p].median() - train_df.loc[train_df["severity"]=="LL", p].median()
-#     res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
-# res_roc.sort_index(inplace=True)
-# res_roc.sort_values("AUROC")
+res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
+for p in features_ml:
+    res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="M", p].median() - train_df.loc[train_df["severity"]=="LL", p].median()
+    res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
+res_roc.sort_index(inplace=True)
+res_roc.sort_values("AUROC")
 
-# feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
+feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
 
 
-# print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
+print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
 
-# # ---------------------
-# # 4. Define feature sets
-# # ---------------------
-# meta_cols = ['severity', 'sex']
-# protein_cols = feat_high_roc
+# ---------------------
+# 4. Define feature sets
+# ---------------------
+meta_cols = ['severity', 'sex']
+protein_cols = feat_high_roc
 
-# y = balanced_train_df['severity']
+y = balanced_train_df['severity']
 
-# X_sets = {
-#     "Proteins only": balanced_train_df[protein_cols],
-#     # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
-#     # "Age": balanced_train_df[["age"]],
-#     # "Sex": balanced_train_df[["sex"]],
-#     # "Proteins + FBC": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
-#     # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
-#     # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
-#     # "Proteins + FBC + Sex": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
-#     # "Proteins + FBC + Age": balanced_train_df[
-#         # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
+X_sets = {
+    "Proteins only": balanced_train_df[protein_cols],
+    # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+    # "Age": balanced_train_df[["age"]],
+    # "Sex": balanced_train_df[["sex"]],
+    # "Proteins + FBC": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+    # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
+    # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
+    # "Proteins + FBC + Sex": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
+    # "Proteins + FBC + Age": balanced_train_df[
+        # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
     
-#     # "Proteins + FBC + Sex + Age": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
-#     # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
-#     # "Sex + Age": balanced_train_df[["sex", "age"]],
-# }
+    # "Proteins + FBC + Sex + Age": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
+    # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
+    # "Sex + Age": balanced_train_df[["sex", "age"]],
+}
 
-# # ---------------------
-# # 5. Define models
-# # ---------------------
-# scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
+# ---------------------
+# 5. Define models
+# ---------------------
+scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
 
-# cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
-# n_trees = 20
-# max_depth = 2
+cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
+n_trees = 20
+max_depth = 2
 
-# models = {
-#     # "LogisticRegression": LogisticRegression(
-#         # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
-#     "RandomForest": RandomForestClassifier(
-#         random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
-#     # "GradientBoosting": GradientBoostingClassifier(
-#     #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
-#     # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
-# }
+models = {
+    # "LogisticRegression": LogisticRegression(
+        # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
+    "RandomForest": RandomForestClassifier(
+        random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
+    # "GradientBoosting": GradientBoostingClassifier(
+    #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
+    # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
+}
 
-# # Define different numbers of features to test
-# feature_counts = list(range(1, 35))
+# Define different numbers of features to test
+feature_counts = list(range(1, 35))
 
 
-# # Store learning curve results here
-# learning_curve_results = []
+# Store learning curve results here
+learning_curve_results = []
 
-# for set_name, X in X_sets.items():
-#     for model_name, model in models.items():
-#         for k in feature_counts:
+for set_name, X in X_sets.items():
+    for model_name, model in models.items():
+        for k in feature_counts:
             
-#             # Make sure k doesn't exceed number of features
-#             k_adjusted = min(k, X.shape[1])
+            # Make sure k doesn't exceed number of features
+            k_adjusted = min(k, X.shape[1])
 
-#             # Create pipeline with feature selection + classifier
-#             pipe = Pipeline([
-#                 ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
-#                 ('clf', clone(model))
-#             ])
+            # Create pipeline with feature selection + classifier
+            pipe = Pipeline([
+                ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
+                ('clf', clone(model))
+            ])
 
-#             # Initialize variables
-#             best_params = {}
-#             scores = {}
+            # Initialize variables
+            best_params = {}
+            scores = {}
 
-#             y_prob = cross_val_predict(
-#                 pipe,
-#                 X,
-#                 y.loc[X.index],
-#                 cv=cv,
-#                 method="predict_proba"
-#             )[:, 1]
+            y_prob = cross_val_predict(
+                pipe,
+                X,
+                y.loc[X.index],
+                cv=cv,
+                method="predict_proba"
+            )[:, 1]
 
-#             scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
+            scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
 
-#             avg_roc_auc = scores['test_roc_auc'].mean()
-#             avg_accuracy = scores["test_accuracy"].mean()
+            avg_roc_auc = scores['test_roc_auc'].mean()
+            avg_accuracy = scores["test_accuracy"].mean()
 
-#             learning_curve_results.append({
-#                 'Feature_Set': set_name,
-#                 'Model': model_name,
-#                 'Num_Features': k_adjusted,
-#                 'Mean_Accuracy': avg_accuracy,
-#                 'Mean_AUROC': avg_roc_auc,
+            learning_curve_results.append({
+                'Feature_Set': set_name,
+                'Model': model_name,
+                'Num_Features': k_adjusted,
+                'Mean_Accuracy': avg_accuracy,
+                'Mean_AUROC': avg_roc_auc,
 
-#                 # 'features': 
-#             })
+                # 'features': 
+            })
         
 
-#             if model_name=="RandomForest":
-#                 if k==50:
-#                     break
+            if model_name=="RandomForest":
+                if k==50:
+                    break
 
-# lc_df = pd.DataFrame(learning_curve_results)
-# lc_df.to_csv(
-#     os.path.join(
-#         "results", "mansonella", "ml", "results_learning_curve_MPvsCTRL.csv"
-#     )
-# )
-# # Plot learning curves
-# plt.figure(figsize=(12, 8))
+lc_df = pd.DataFrame(learning_curve_results)
+lc_df.to_csv(
+    os.path.join(
+        "results", "mansonella", "ml", "results_learning_curve_MPvsCTRL.csv"
+    )
+)
+# Plot learning curves
+plt.figure(figsize=(12, 8))
 
-# for (set_name, model_name), group_df in lc_df.groupby(
-#     ['Feature_Set', 'Model']):
-#     plt.plot(
-#         group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
+for (set_name, model_name), group_df in lc_df.groupby(
+    ['Feature_Set', 'Model']):
+    plt.plot(
+        group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
 
-# plt.xlabel("Number of Features Selected")
-# plt.ylabel("Mean Accuracy (cross-validated)")
-# plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
-# plt.legend(loc='lower right')
-# plt.grid(True)
-# plt.tight_layout()
-# plt.savefig(
-#     os.path.join(
-#         "results", "mansonella", "ml", "learning_curve_cv_accuracy_MPvsCTRL.png"
-#     )
-# )
-# plt.show()
+plt.xlabel("Number of Features Selected")
+plt.ylabel("Mean Accuracy (cross-validated)")
+plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(
+        "results", "mansonella", "ml", "learning_curve_cv_accuracy_MPvsCTRL.png"
+    )
+)
+plt.show()
 
 ```
 
 ```{python}
 
-# best_feature_set = "Proteins only"
-# best_model_name = "RandomForest"
+best_feature_set = "Proteins only"
+best_model_name = "RandomForest"
 
-# print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
+print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
 
-# # Get the model object
-# best_model = models[best_model_name]
+# Get the model object
+best_model = models[best_model_name]
 
-# # Prepare training data
-# X_train_final = X_sets[best_feature_set]
-# y_train_final = y.loc[X_sets[best_feature_set].index]
+# Prepare training data
+X_train_final = X_sets[best_feature_set]
+y_train_final = y.loc[X_sets[best_feature_set].index]
 
-# # X_train_final =pipe_final train_df[selected_features]
+# X_train_final =pipe_final train_df[selected_features]
 
-# # Prepare test data
-# test_features = test_df[list(X_train_final.columns)]
-# y_test = test_df['severity']
+# Prepare test data
+test_features = test_df[list(X_train_final.columns)]
+y_test = test_df['severity']
 
-# # Build and train pipeline
+# Build and train pipeline
 
-# pipe_final_MPvsCTRL = Pipeline([
-#     ('pipe_final', SelectKBest(score_func=f_classif, k=14)),
-#     ('clf', best_model)
-# ])
+pipe_final_MPvsCTRL = Pipeline([
+    ('pipe_final', SelectKBest(score_func=f_classif, k=14)),
+    ('clf', best_model)
+])
 
-# pipe_final_MPvsCTRL.fit(X_train_final, y_train_final)
+pipe_final_MPvsCTRL.fit(X_train_final, y_train_final)
 
-# # Predict on train set
-# y_pred_test = pipe_final_MPvsCTRL.predict(test_features)
-# y_prob_test = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]  
-# # Predict on test set
-# y_pred_train = pipe_final_MPvsCTRL.predict(X_train_final)
-# y_prob_train = pipe_final_MPvsCTRL.predict_proba(X_train_final)[:, 1] 
-
-
-# # Evaluation metrics
-# test_metrics = pd.Series({
-#     'accuracy': accuracy_score(y_test, y_pred_test),
-#     'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
-#     'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
-#     'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
-#     'auroc': roc_auc_score(y_test, y_prob_test) 
-# })
-
-# train_metrics = pd.Series({
-#     'accuracy': accuracy_score(y_train_final, y_pred_train),
-#     'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
-#     'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
-#     'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
-#     'auroc': roc_auc_score(y_train_final, y_prob_train)
-# })
-
-# ml_results_MPvsCTRL = pd.concat([
-#     train_metrics, test_metrics
-# ], axis=1)
-# ml_results_MPvsCTRL.columns = ["Training_MPvsCTRL", "Test_MPvsCTRL"]
+# Predict on train set
+y_pred_test = pipe_final_MPvsCTRL.predict(test_features)
+y_prob_test = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]  
+# Predict on test set
+y_pred_train = pipe_final_MPvsCTRL.predict(X_train_final)
+y_prob_train = pipe_final_MPvsCTRL.predict_proba(X_train_final)[:, 1] 
 
 
-# # Collect data for CM and ROC Curves
+# Evaluation metrics
+test_metrics = pd.Series({
+    'accuracy': accuracy_score(y_test, y_pred_test),
+    'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
+    'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
+    'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
+    'auroc': roc_auc_score(y_test, y_prob_test) 
+})
 
-# # Re-map labels to binary for ROC
-# label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
-# y_train_bin = y_train_final.map(label_mapping).values
-# y_test_bin = y_test.map(label_mapping).values
+train_metrics = pd.Series({
+    'accuracy': accuracy_score(y_train_final, y_pred_train),
+    'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
+    'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
+    'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
+    'auroc': roc_auc_score(y_train_final, y_prob_train)
+})
 
-# # 1. ROC Curve on Training Set (CV predictions)
-# y_train_proba_cv = cross_val_predict(
-#     pipe_final_MPvsCTRL, X_train_final, y_train_final,
-#     cv=cv, method='predict_proba'
-# )[:, 1]
-
-# fpr_train_MPvsCTRL, tpr_train_MPvsCTRL, _ = roc_curve(y_train_bin, y_train_proba_cv)
-# roc_auc_train_MPvsCTRL = auc(fpr_train_MPvsCTRL, tpr_train_MPvsCTRL)
-
-# # 2. ROC Curve on Test Set
-# y_test_proba = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]
-# fpr_test_MPvsCTRL, tpr_test_MPvsCTRL, _ = roc_curve(y_test_bin, y_test_proba)
-# roc_auc_test_MPvsCTRL = auc(fpr_test_MPvsCTRL, tpr_test_MPvsCTRL)
+ml_results_MPvsCTRL = pd.concat([
+    train_metrics, test_metrics
+], axis=1)
+ml_results_MPvsCTRL.columns = ["Training_MPvsCTRL", "Test_MPvsCTRL"]
 
 
-# # Test set predictions at threshold 0.5
-# y_test_pred = (y_test_proba >= 0.5).astype(int)
-# cm_test_MPvsCTRL = pd.DataFrame(
-#     confusion_matrix(y_test_bin, y_test_pred), 
-#     index=["MP", "CTRL"], columns=["MP", "CTRL"])
+# Collect data for CM and ROC Curves
 
-# y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
-# cm_train_MPvsCTRL = pd.DataFrame(
-#     confusion_matrix(y_train_bin, y_train_pred_cv),
-#     index=["MP", "CTRL"], columns=["MP", "CTRL"])
+# Re-map labels to binary for ROC
+label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
+y_train_bin = y_train_final.map(label_mapping).values
+y_test_bin = y_test.map(label_mapping).values
+
+# 1. ROC Curve on Training Set (CV predictions)
+y_train_proba_cv = cross_val_predict(
+    pipe_final_MPvsCTRL, X_train_final, y_train_final,
+    cv=cv, method='predict_proba'
+)[:, 1]
+
+fpr_train_MPvsCTRL, tpr_train_MPvsCTRL, _ = roc_curve(y_train_bin, y_train_proba_cv)
+roc_auc_train_MPvsCTRL = auc(fpr_train_MPvsCTRL, tpr_train_MPvsCTRL)
+
+# 2. ROC Curve on Test Set
+y_test_proba = pipe_final_MPvsCTRL.predict_proba(test_features)[:, 1]
+fpr_test_MPvsCTRL, tpr_test_MPvsCTRL, _ = roc_curve(y_test_bin, y_test_proba)
+roc_auc_test_MPvsCTRL = auc(fpr_test_MPvsCTRL, tpr_test_MPvsCTRL)
+
+
+# Test set predictions at threshold 0.5
+y_test_pred = (y_test_proba >= 0.5).astype(int)
+cm_test_MPvsCTRL = pd.DataFrame(
+    confusion_matrix(y_test_bin, y_test_pred), 
+    index=["MP", "CTRL"], columns=["MP", "CTRL"])
+
+y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
+cm_train_MPvsCTRL = pd.DataFrame(
+    confusion_matrix(y_train_bin, y_train_pred_cv),
+    index=["MP", "CTRL"], columns=["MP", "CTRL"])
 ```
 
 ```{python}
-# selected_features = X_train_final.columns[pipe_final_MPvsCTRL.named_steps['pipe_final'].get_support()]
-# fi = pipe_final_MPvsCTRL.named_steps['clf'].feature_importances_
+selected_features = X_train_final.columns[pipe_final_MPvsCTRL.named_steps['pipe_final'].get_support()]
+fi = pipe_final_MPvsCTRL.named_steps['clf'].feature_importances_
 
-# fi_df_MPvsCTRL = pd.DataFrame(
-#     {
-#         "Genes": meta_table.loc[selected_features, "Gene Name"].values,
-#         "FI": fi,
-#     }, index=selected_features
-# ).sort_values(by="FI")[::-1]
+fi_df_MPvsCTRL = pd.DataFrame(
+    {
+        "Genes": meta_table.loc[selected_features, "Gene Name"].values,
+        "FI": fi,
+    }, index=selected_features
+).sort_values(by="FI")[::-1]
 
-# test_df_MPvsCTRL = test_df
-# train_df_MPvsCTRL = train_df
+test_df_MPvsCTRL = test_df
+train_df_MPvsCTRL = train_df
 
-# y_pred_test_MPvsCTRL = y_test_pred
-# y_pred_train_MPvsCTRL = y_pred_train
-# y_prob_test_MPvsCTRL = y_prob_test
-# y_prob_train_MPvsCTRL = y_prob_train 
+y_pred_test_MPvsCTRL = y_test_pred
+y_pred_train_MPvsCTRL = y_pred_train
+y_prob_test_MPvsCTRL = y_prob_test
+y_prob_train_MPvsCTRL = y_prob_train 
 ```
 
 ### Classification of MP vs Loa MF
 
 ```{python}
-# # ---------------------
-# # 1. Load and filter data
-# # ---------------------
+# ---------------------
+# 1. Load and filter data
+# ---------------------
 
-# random_state=20250811
+random_state=20250811
 
-# # only features with 100% completeness considered
-# missingness = df[meta_table.index].isna().mean()
-# low_missing_proteins = missingness[missingness <= 0.2].index
-# features_ml = list(set(low_missing_proteins) & set(meta_table.index))
+# only features with 100% completeness considered
+missingness = df[meta_table.index].isna().mean()
+low_missing_proteins = missingness[missingness <= 0.2].index
+features_ml = list(set(low_missing_proteins) & set(meta_table.index))
 
-# # Filter only relevant classes
-# df_filtered = df[df['severity'].isin(['M', 'LL'])].copy().dropna(subset="age") # 'LLewmf'
+# Filter only relevant classes
+df_filtered = df[df['severity'].isin(['M', 'LL'])].copy().dropna(subset="age") # 'LLewmf'
 
-# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["age"].between(20, 40)) & (df_filtered["sex"]==0)].sample(20, random_state=45).index, inplace=True)
-# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==1)].sample(11, random_state=45).index, inplace=True)
-# df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==0)].sample(12, random_state=45).index, inplace=True)
-
-
-# df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
-
-# df_filtered_prot = pd.DataFrame(
-#     KNNImputer().fit_transform(df_filtered[features_ml]),
-#     index=df_filtered.index,
-#     columns=features_ml,
-#     )
-# df_filtered = pd.concat(
-#     [df_filtered[["age", "sex", "severity",]], # "severity_combined"
-#     df_filtered_prot], axis=1)
-
-# # ---------------------
-# # 2. Define Test Set
-# # ---------------------
-
-# test_df = (
-#     df_filtered.groupby('severity', group_keys=False)
-#     .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
-# )
-
-# # Remaining data is training set
-# train_df = df_filtered.drop(index=test_df.index)
-
-# # ---------------------
-# # 3. Balance sample sizes in training data
-# # ---------------------
-# min_count = train_df['severity'].value_counts().min()
-# balanced_train_df = (
-#     train_df.groupby('severity', group_keys=False)
-#     .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
-# )
-
-# res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
-# for p in features_ml:
-#     res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="MP", p].median() - train_df.loc[train_df["severity"]=="LLmf", p].median()
-#     res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
-# res_roc.sort_index(inplace=True)
-# res_roc.sort_values("AUROC")
-
-# feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
+df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["age"].between(20, 40)) & (df_filtered["sex"]==0)].sample(20, random_state=45).index, inplace=True)
+df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==1)].sample(11, random_state=45).index, inplace=True)
+df_filtered.drop(df_filtered[(df_filtered["severity"]=="M") & (df_filtered["sex"]==0)].sample(12, random_state=45).index, inplace=True)
 
 
-# print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
+df_filtered_prot = df_filtered.rename(dict(zip(meta_table.index, meta_table["Gene Name"])), axis=1)
 
-# # ---------------------
-# # 4. Define feature sets
-# # ---------------------
-# meta_cols = ['severity', 'sex']
-# protein_cols = feat_high_roc
+df_filtered_prot = pd.DataFrame(
+    KNNImputer().fit_transform(df_filtered[features_ml]),
+    index=df_filtered.index,
+    columns=features_ml,
+    )
+df_filtered = pd.concat(
+    [df_filtered[["age", "sex", "severity",]], # "severity_combined"
+    df_filtered_prot], axis=1)
 
-# y = balanced_train_df['severity']
+# ---------------------
+# 2. Define Test Set
+# ---------------------
 
-# X_sets = {
-#     "Proteins only": balanced_train_df[protein_cols],
-#     # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
-#     # "Age": balanced_train_df[["age"]],
-#     # "Sex": balanced_train_df[["sex"]],
-#     # "Proteins + FBC": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
-#     # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
-#     # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
-#     # "Proteins + FBC + Sex": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
-#     # "Proteins + FBC + Age": balanced_train_df[
-#         # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
+test_df = (
+    df_filtered.groupby('severity', group_keys=False)
+    .apply(lambda x: resample(x, replace=False, n_samples=12, random_state=random_state))
+)
+
+# Remaining data is training set
+train_df = df_filtered.drop(index=test_df.index)
+
+# ---------------------
+# 3. Balance sample sizes in training data
+# ---------------------
+min_count = train_df['severity'].value_counts().min()
+balanced_train_df = (
+    train_df.groupby('severity', group_keys=False)
+    .apply(lambda x: resample(x, replace=False, n_samples=min_count, random_state=random_state))
+)
+
+res_roc = pd.DataFrame(index= features_ml, columns=["medFC", "AUROC"])
+for p in features_ml:
+    res_roc.loc[p, "medFC"] = train_df.loc[train_df["severity"]=="MP", p].median() - train_df.loc[train_df["severity"]=="LLmf", p].median()
+    res_roc.loc[p, "AUROC"] = roc_auc_score(train_df["severity"], train_df[p])
+res_roc.sort_index(inplace=True)
+res_roc.sort_values("AUROC")
+
+feat_high_roc = res_roc[(res_roc["AUROC"]<0.40) | (res_roc["AUROC"]>0.60)].index
+
+
+print("Balanced training set severity counts:\n", balanced_train_df['severity'].value_counts())
+
+# ---------------------
+# 4. Define feature sets
+# ---------------------
+meta_cols = ['severity', 'sex']
+protein_cols = feat_high_roc
+
+y = balanced_train_df['severity']
+
+X_sets = {
+    "Proteins only": balanced_train_df[protein_cols],
+    # "FBC": balanced_train_df[["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+    # "Age": balanced_train_df[["age"]],
+    # "Sex": balanced_train_df[["sex"]],
+    # "Proteins + FBC": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs"]].dropna(),
+    # "Proteins + Sex": balanced_train_df[list(protein_cols) + ["sex"]],
+    # "Proteins + Age": balanced_train_df[list(protein_cols) + ["age"]],
+    # "Proteins + FBC + Sex": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex"]].dropna(),
+    # "Proteins + FBC + Age": balanced_train_df[
+        # list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "age"]].dropna(),
     
-#     # "Proteins + FBC + Sex + Age": balanced_train_df[
-#     #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
-#     # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
-#     # "Sex + Age": balanced_train_df[["sex", "age"]],
-# }
+    # "Proteins + FBC + Sex + Age": balanced_train_df[
+    #     list(protein_cols) + ["lym_abs", "neu_abs", "mon_abs", "eos_abs", "bas_abs", "sex", "age"]].dropna(),
+    # "Proteins + Sex + Age": balanced_train_df[list(protein_cols) + ["sex", "age"]],
+    # "Sex + Age": balanced_train_df[["sex", "age"]],
+}
 
-# # ---------------------
-# # 5. Define models
-# # ---------------------
-# scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
+# ---------------------
+# 5. Define models
+# ---------------------
+scoring = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'roc_auc']
 
-# cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
-# n_trees = 20
-# max_depth = 2
+cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
+n_trees = 20
+max_depth = 2
 
-# models = {
-#     # "LogisticRegression": LogisticRegression(
-#         # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
-#     "RandomForest": RandomForestClassifier(
-#         random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
-#     # "GradientBoosting": GradientBoostingClassifier(
-#     #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
-#     # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
-# }
+models = {
+    # "LogisticRegression": LogisticRegression(
+        # max_iter=500, penalty='elasticnet', solver='saga', l1_ratio=0.5, random_state=random_state),
+    "RandomForest": RandomForestClassifier(
+        random_state=random_state, max_depth=max_depth, n_estimators=n_trees),
+    # "GradientBoosting": GradientBoostingClassifier(
+    #     random_state=random_state, max_depth=max_depth, n_estimators=n_trees), 
+    # "SVM": SVC(probability=True, kernel='rbf', random_state=random_state)
+}
 
-# # Define different numbers of features to test
-# feature_counts = list(range(1, 35))
+# Define different numbers of features to test
+feature_counts = list(range(1, 35))
 
 
-# # Store learning curve results here
-# learning_curve_results = []
+# Store learning curve results here
+learning_curve_results = []
 
-# for set_name, X in X_sets.items():
-#     for model_name, model in models.items():
-#         for k in feature_counts:
+for set_name, X in X_sets.items():
+    for model_name, model in models.items():
+        for k in feature_counts:
             
-#             # Make sure k doesn't exceed number of features
-#             k_adjusted = min(k, X.shape[1])
+            # Make sure k doesn't exceed number of features
+            k_adjusted = min(k, X.shape[1])
 
-#             # Create pipeline with feature selection + classifier
-#             pipe = Pipeline([
-#                 ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
-#                 ('clf', clone(model))
-#             ])
+            # Create pipeline with feature selection + classifier
+            pipe = Pipeline([
+                ('feature_selection', SelectKBest(score_func=f_classif, k=k_adjusted)),
+                ('clf', clone(model))
+            ])
 
-#             # Initialize variables
-#             best_params = {}
-#             scores = {}
+            # Initialize variables
+            best_params = {}
+            scores = {}
 
-#             y_prob = cross_val_predict(
-#                 pipe,
-#                 X,
-#                 y.loc[X.index],
-#                 cv=cv,
-#                 method="predict_proba"
-#             )[:, 1]
+            y_prob = cross_val_predict(
+                pipe,
+                X,
+                y.loc[X.index],
+                cv=cv,
+                method="predict_proba"
+            )[:, 1]
 
-#             scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
+            scores = cross_validate(pipe, X, y.loc[X.index], cv=cv, scoring=scoring, return_estimator=True)
 
-#             avg_roc_auc = scores['test_roc_auc'].mean()
-#             avg_accuracy = scores["test_accuracy"].mean()
+            avg_roc_auc = scores['test_roc_auc'].mean()
+            avg_accuracy = scores["test_accuracy"].mean()
 
-#             learning_curve_results.append({
-#                 'Feature_Set': set_name,
-#                 'Model': model_name,
-#                 'Num_Features': k_adjusted,
-#                 'Mean_Accuracy': avg_accuracy,
-#                 'Mean_AUROC': avg_roc_auc,
-#                 # 'features': 
-#             })
+            learning_curve_results.append({
+                'Feature_Set': set_name,
+                'Model': model_name,
+                'Num_Features': k_adjusted,
+                'Mean_Accuracy': avg_accuracy,
+                'Mean_AUROC': avg_roc_auc,
+                # 'features': 
+            })
         
 
-#             if model_name=="RandomForest":
-#                 if k==21:
-#                     break
+            if model_name=="RandomForest":
+                if k==21:
+                    break
 
-# lc_df = pd.DataFrame(learning_curve_results)
-# # lc_df.to_csv(
-# #     os.path.join(
-# #         "results", "mansonella", "ml", "results_learning_curve.csv"
-# #     )
-# # )
-# # Plot learning curves
-# plt.figure(figsize=(12, 8))
+lc_df = pd.DataFrame(learning_curve_results)
+# lc_df.to_csv(
+#     os.path.join(
+#         "results", "mansonella", "ml", "results_learning_curve.csv"
+#     )
+# )
+# Plot learning curves
+plt.figure(figsize=(12, 8))
 
-# for (set_name, model_name), group_df in lc_df.groupby(
-#     ['Feature_Set', 'Model']):
-#     plt.plot(
-#         group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
+for (set_name, model_name), group_df in lc_df.groupby(
+    ['Feature_Set', 'Model']):
+    plt.plot(
+        group_df['Num_Features'], group_df['Mean_Accuracy'], marker='o', label=f"{set_name} - {model_name}") 
 
-# plt.xlabel("Number of Features Selected")
-# plt.ylabel("Mean Accuracy (cross-validated)")
-# plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
-# plt.legend(loc='lower right')
-# plt.grid(True)
-# plt.tight_layout()
-# # plt.savefig(
-# #     os.path.join(
-# #         "results", "mansonella", "ml", "learning_curve_cv_accuracy.png"
-# #     )
-# # )
-# plt.show()
+plt.xlabel("Number of Features Selected")
+plt.ylabel("Mean Accuracy (cross-validated)")
+plt.title("Learning Curve: Effect of Number of Selected Features on Accuracy")
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.tight_layout()
+# plt.savefig(
+#     os.path.join(
+#         "results", "mansonella", "ml", "learning_curve_cv_accuracy.png"
+#     )
+# )
+plt.show()
 
 ```
 
 ```{python}
 
-# best_feature_set = "Proteins only"
-# best_model_name = "RandomForest"
+best_feature_set = "Proteins only"
+best_model_name = "RandomForest"
 
-# print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
+print(f"\nEvaluating best model '{best_model_name}' with feature set '{best_feature_set}' on the test set...")
 
-# # Get the model object
-# best_model = models[best_model_name]
+# Get the model object
+best_model = models[best_model_name]
 
-# # Prepare training data
-# X_train_final = X_sets[best_feature_set]
-# y_train_final = y.loc[X_sets[best_feature_set].index]
+# Prepare training data
+X_train_final = X_sets[best_feature_set]
+y_train_final = y.loc[X_sets[best_feature_set].index]
 
-# # X_train_final =pipe_final train_df[selected_features]
+# X_train_final =pipe_final train_df[selected_features]
 
-# # Prepare test data
-# test_features = test_df[list(X_train_final.columns)]
-# y_test = test_df['severity']
+# Prepare test data
+test_features = test_df[list(X_train_final.columns)]
+y_test = test_df['severity']
 
-# # Build and train pipeline
+# Build and train pipeline
 
-# pipe_final_MPvsLLmf = Pipeline([
-#     ('pipe_final', SelectKBest(score_func=f_classif, k=21)),
-#     ('clf', best_model)
-# ])
+pipe_final_MPvsLLmf = Pipeline([
+    ('pipe_final', SelectKBest(score_func=f_classif, k=21)),
+    ('clf', best_model)
+])
 
-# pipe_final_MPvsLLmf.fit(X_train_final, y_train_final)
+pipe_final_MPvsLLmf.fit(X_train_final, y_train_final)
 
-# # Predict on train set
-# y_pred_test = pipe_final_MPvsLLmf.predict(test_features)
-# y_prob_test = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]  
-# # Predict on test set
-# y_pred_train = pipe_final_MPvsLLmf.predict(X_train_final)
-# y_prob_train = pipe_final_MPvsLLmf.predict_proba(X_train_final)[:, 1] 
-
-
-# # Evaluation metrics
-# test_metrics = pd.Series({
-#     'accuracy': accuracy_score(y_test, y_pred_test),
-#     'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
-#     'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
-#     'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
-#     'auroc': roc_auc_score(y_test, y_prob_test) 
-# })
-
-# train_metrics = pd.Series({
-#     'accuracy': accuracy_score(y_train_final, y_pred_train),
-#     'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
-#     'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
-#     'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
-#     'auroc': roc_auc_score(y_train_final, y_prob_train)
-# })
-
-# ml_results_MPvsLLmf = pd.concat([
-#     train_metrics, test_metrics
-# ], axis=1)
-# ml_results_MPvsLLmf.columns = ["Training_MPvsLLmf", "Test_MPvsLLmf"]
-
-# # Collect data for CM and ROC Curves
-
-# # Re-map labels to binary for ROC
-# label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
-# y_train_bin = y_train_final.map(label_mapping).values
-# y_test_bin = y_test.map(label_mapping).values
-
-# # 1. ROC Curve on Training Set (CV predictions)
-# y_train_proba_cv = cross_val_predict(
-#     pipe_final_MPvsLLmf, X_train_final, y_train_final,
-#     cv=cv, method='predict_proba'
-# )[:, 1]
-
-# fpr_train_MPvsLLmf, tpr_train_MPvsLLmf, _ = roc_curve(y_train_bin, y_train_proba_cv)
-# roc_auc_train_MPvsLLmf = auc(fpr_train_MPvsLLmf, tpr_train_MPvsLLmf)
-
-# # 2. ROC Curve on Test Set
-# y_test_proba = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]
-# fpr_test_MPvsLLmf, tpr_test_MPvsLLmf, _ = roc_curve(y_test_bin, y_test_proba)
-# roc_auc_test_MPvsLLmf = auc(fpr_test_MPvsLLmf, tpr_test_MPvsLLmf)
+# Predict on train set
+y_pred_test = pipe_final_MPvsLLmf.predict(test_features)
+y_prob_test = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]  
+# Predict on test set
+y_pred_train = pipe_final_MPvsLLmf.predict(X_train_final)
+y_prob_train = pipe_final_MPvsLLmf.predict_proba(X_train_final)[:, 1] 
 
 
-# # Test set predictions at threshold 0.5
-# y_test_pred = (y_test_proba >= 0.5).astype(int)
-# cm_test_MPvsLLmf = pd.DataFrame(
-#     confusion_matrix(y_test_bin, y_test_pred), 
-#     index=["LLmf", "MP"], columns=["LLmf", "MP"])
+# Evaluation metrics
+test_metrics = pd.Series({
+    'accuracy': accuracy_score(y_test, y_pred_test),
+    'precision_macro': precision_score(y_test, y_pred_test, average='macro'),
+    'recall_macro': recall_score(y_test, y_pred_test, average='macro'),
+    'f1_macro': f1_score(y_test, y_pred_test, average='macro'),
+    'auroc': roc_auc_score(y_test, y_prob_test) 
+})
 
-# y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
-# cm_train_MPvsLLmf = pd.DataFrame(
-#     confusion_matrix(y_train_bin, y_train_pred_cv),
-#     index=["LLmf", "MP"], columns=["LLmf", "MP"])
+train_metrics = pd.Series({
+    'accuracy': accuracy_score(y_train_final, y_pred_train),
+    'precision_macro': precision_score(y_train_final, y_pred_train, average='macro'),
+    'recall_macro': recall_score(y_train_final, y_pred_train, average='macro'),
+    'f1_macro': f1_score(y_train_final, y_pred_train, average='macro'),
+    'auroc': roc_auc_score(y_train_final, y_prob_train)
+})
+
+ml_results_MPvsLLmf = pd.concat([
+    train_metrics, test_metrics
+], axis=1)
+ml_results_MPvsLLmf.columns = ["Training_MPvsLLmf", "Test_MPvsLLmf"]
+
+# Collect data for CM and ROC Curves
+
+# Re-map labels to binary for ROC
+label_mapping = {label: idx for idx, label in enumerate(np.unique(y_train_final))}
+y_train_bin = y_train_final.map(label_mapping).values
+y_test_bin = y_test.map(label_mapping).values
+
+# 1. ROC Curve on Training Set (CV predictions)
+y_train_proba_cv = cross_val_predict(
+    pipe_final_MPvsLLmf, X_train_final, y_train_final,
+    cv=cv, method='predict_proba'
+)[:, 1]
+
+fpr_train_MPvsLLmf, tpr_train_MPvsLLmf, _ = roc_curve(y_train_bin, y_train_proba_cv)
+roc_auc_train_MPvsLLmf = auc(fpr_train_MPvsLLmf, tpr_train_MPvsLLmf)
+
+# 2. ROC Curve on Test Set
+y_test_proba = pipe_final_MPvsLLmf.predict_proba(test_features)[:, 1]
+fpr_test_MPvsLLmf, tpr_test_MPvsLLmf, _ = roc_curve(y_test_bin, y_test_proba)
+roc_auc_test_MPvsLLmf = auc(fpr_test_MPvsLLmf, tpr_test_MPvsLLmf)
+
+
+# Test set predictions at threshold 0.5
+y_test_pred = (y_test_proba >= 0.5).astype(int)
+cm_test_MPvsLLmf = pd.DataFrame(
+    confusion_matrix(y_test_bin, y_test_pred), 
+    index=["LLmf", "MP"], columns=["LLmf", "MP"])
+
+y_train_pred_cv = (y_train_proba_cv >= 0.5).astype(int)
+cm_train_MPvsLLmf = pd.DataFrame(
+    confusion_matrix(y_train_bin, y_train_pred_cv),
+    index=["LLmf", "MP"], columns=["LLmf", "MP"])
 
 ```
 
 
 ```{python}
-# selected_features = X_train_final.columns[pipe_final_MPvsLLmf.named_steps['pipe_final'].get_support()]
-# fi = pipe_final_MPvsLLmf.named_steps['clf'].feature_importances_
+selected_features = X_train_final.columns[pipe_final_MPvsLLmf.named_steps['pipe_final'].get_support()]
+fi = pipe_final_MPvsLLmf.named_steps['clf'].feature_importances_
 
-# fi_df_MPvsLLmf = pd.DataFrame(
-#     {
-#         "Genes": meta_table.loc[selected_features, "Gene Name"].values,
-#         "FI": fi,
-#     }, index=selected_features
-# ).sort_values(by="FI")[::-1]
+fi_df_MPvsLLmf = pd.DataFrame(
+    {
+        "Genes": meta_table.loc[selected_features, "Gene Name"].values,
+        "FI": fi,
+    }, index=selected_features
+).sort_values(by="FI")[::-1]
 
-# test_df_MPvsLLmf = test_df
-# train_df_MPvsLLmf = train_df
+test_df_MPvsLLmf = test_df
+train_df_MPvsLLmf = train_df
 
-# y_pred_test_MPvsLLmf = y_test_pred
-# y_pred_train_MPvsLLmf = y_pred_train
-# y_prob_test_MPvsLLmf = y_prob_test
-# y_prob_train_MPvsLLmf = y_prob_train 
+y_pred_test_MPvsLLmf = y_test_pred
+y_pred_train_MPvsLLmf = y_pred_train
+y_prob_test_MPvsLLmf = y_prob_test
+y_prob_train_MPvsLLmf = y_prob_train 
 ```
 
 Collect data from ML
 
 ```{python}
-# test_df_MPvsCTRL["Test_Train"] ="Test"
-# train_df_MPvsCTRL["Test_Train"] ="Train"
-# test_df_MPvsLLmf["Test_Train"] ="Test"
-# train_df_MPvsLLmf["Test_Train"] ="Train"
+test_df_MPvsCTRL["Test_Train"] ="Test"
+train_df_MPvsCTRL["Test_Train"] ="Train"
+test_df_MPvsLLmf["Test_Train"] ="Test"
+train_df_MPvsLLmf["Test_Train"] ="Train"
 
-# test_df_MPvsCTRL.index.name ="Pat_Idx"
-# train_df_MPvsCTRL.index.name ="Pat_Idx"
-# test_df_MPvsLLmf.index.name ="Pat_Idx"
-# train_df_MPvsLLmf.index.name ="Pat_Idx"
+test_df_MPvsCTRL.index.name ="Pat_Idx"
+train_df_MPvsCTRL.index.name ="Pat_Idx"
+test_df_MPvsLLmf.index.name ="Pat_Idx"
+train_df_MPvsLLmf.index.name ="Pat_Idx"
 
-# test_df_MPvsCTRL["y_pred_test"] = y_pred_test_MPvsCTRL
-# train_df_MPvsCTRL["y_pred_train"] = y_pred_train_MPvsCTRL 
-# test_df_MPvsCTRL["y_prob_test"] = y_prob_test_MPvsCTRL
-# train_df_MPvsCTRL["y_prob_train"] = y_prob_train_MPvsCTRL
+test_df_MPvsCTRL["y_pred_test"] = y_pred_test_MPvsCTRL
+train_df_MPvsCTRL["y_pred_train"] = y_pred_train_MPvsCTRL 
+test_df_MPvsCTRL["y_prob_test"] = y_prob_test_MPvsCTRL
+train_df_MPvsCTRL["y_prob_train"] = y_prob_train_MPvsCTRL
 
-# test_df_MPvsLLmf["y_pred_test"] = y_pred_test_MPvsLLmf
-# train_df_MPvsLLmf["y_pred_train"] = y_pred_train_MPvsLLmf 
-# test_df_MPvsLLmf["y_prob_test"] = y_prob_test_MPvsLLmf
-# train_df_MPvsLLmf["y_prob_train"] = y_prob_train_MPvsLLmf
+test_df_MPvsLLmf["y_pred_test"] = y_pred_test_MPvsLLmf
+train_df_MPvsLLmf["y_pred_train"] = y_pred_train_MPvsLLmf 
+test_df_MPvsLLmf["y_prob_test"] = y_prob_test_MPvsLLmf
+train_df_MPvsLLmf["y_prob_train"] = y_prob_train_MPvsLLmf
 
-# df_ml_MPvsLLmf = pd.concat([
-#     train_df_MPvsLLmf, test_df_MPvsLLmf
-# ])
-# df_ml_MPvsCTRL = pd.concat([
-#     train_df_MPvsCTRL, test_df_MPvsCTRL
-# ])
+df_ml_MPvsLLmf = pd.concat([
+    train_df_MPvsLLmf, test_df_MPvsLLmf
+])
+df_ml_MPvsCTRL = pd.concat([
+    train_df_MPvsCTRL, test_df_MPvsCTRL
+])
 
-# pd.concat([
-#     # ml_results_MPvsCTRL,
-#     # ml_results_MPvsLLmf,
-#     fi_df_MPvsCTRL,
-#     fi_df_MPvsLLmf,
-# ])
+pd.concat([
+    # ml_results_MPvsCTRL,
+    # ml_results_MPvsLLmf,
+    fi_df_MPvsCTRL,
+    fi_df_MPvsLLmf,
+])
 
-# writer = pd.ExcelWriter(os.path.join(
-#     res_path_mans, "ml_results_comb.xlsx"
-# ))
+writer = pd.ExcelWriter(os.path.join(
+    res_path_mans, "ml_results_comb.xlsx"
+))
 
-# with writer:
-#     ml_results_MPvsCTRL.to_excel(
-#         writer, sheet_name="metrics_MvsCTRL", index=True)
-#     ml_results_MPvsLLmf.to_excel(
-#         writer, sheet_name="metricvs_MvsLL", index=True)
-#     fi_df_MPvsCTRL.to_excel(
-#         writer, sheet_name="FeatImpMvsCTRL", index=True)
-#     fi_df_MPvsLLmf.to_excel(
-#         writer, sheet_name="FeatImpMvsLL", index=True)
-#     df_ml_MPvsCTRL.to_excel(
-#         writer, sheet_name="ml_data_MvsCTRL", index=True)
-#     df_ml_MPvsLLmf.to_excel(
-#         writer, sheet_name="ml_data_MvsLL", index=True)
+with writer:
+    ml_results_MPvsCTRL.to_excel(
+        writer, sheet_name="metrics_MvsCTRL", index=True)
+    ml_results_MPvsLLmf.to_excel(
+        writer, sheet_name="metricvs_MvsLL", index=True)
+    fi_df_MPvsCTRL.to_excel(
+        writer, sheet_name="FeatImpMvsCTRL", index=True)
+    fi_df_MPvsLLmf.to_excel(
+        writer, sheet_name="FeatImpMvsLL", index=True)
+    df_ml_MPvsCTRL.to_excel(
+        writer, sheet_name="ml_data_MvsCTRL", index=True)
+    df_ml_MPvsLLmf.to_excel(
+        writer, sheet_name="ml_data_MvsLL", index=True)
 
 ```
 
 
 # M. Perstans  vs M. DEUX
 
-PCR Data shows some inconsistencies with original group annotations. 
 
-Remove inconclusive Cases from analysis
-
-Cohort Statistics for subspecies Level
-
-```{python}
-
-df[["Mansonella FRET Assay", "severity", "mp_mf"]]
-
-cond_ctrl = (df["mp_mf"]==0) & (df["severity"]=="CTRL") & (df["Mansonella FRET Assay"]=="Negative")
-cond_mp = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="perstans")
-cond_deux = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX")
-cond_mix = (df["mp_mf"]>0) & (df["severity"]=="M") & (df["Mansonella FRET Assay"]=="DEUX+perstans")
-
-df["severity_pcr"] = "Inconclusive"
-df.loc[cond_ctrl, "severity_pcr"] = "negative" 
-df.loc[cond_mp, "severity_pcr"] = "MP" 
-df.loc[cond_deux, "severity_pcr"] = "MD" 
-df.loc[cond_mix, "severity_pcr"] = "MDandMP" 
-
-
-```
 
 Inconsistencies between microscopic counts and pcr data
 
@@ -2602,7 +2584,7 @@ Feature Import Barplots
 fig, ax = plt.subplots(1,1, figsize=(3,3))
 sns.barplot(
     fi_df_MPvsCTRL.set_index("Genes")["FI"].iloc[:10], orient="h", ax=ax, 
-    palette=cmap_MvsCTRL(np.linspace(0, 1, 10))[::-1])
+    color = sns.color_palette("colorblind")[3])
 ax.spines['left'].set_linewidth(2)  # Left border thickness
 ax.spines['bottom'].set_linewidth(2) # Bottom border thickness
 ax.spines['right'].set_linewidth(2) # Bottom border thickness
@@ -2619,7 +2601,7 @@ plt.savefig(
 fig, ax = plt.subplots(1,1, figsize=(3,3))
 sns.barplot(
     fi_df_MPvsLLmf.set_index("Genes")["FI"].iloc[:10], orient="h", ax=ax, 
-    palette=cmap_MvsLL(np.linspace(0, 1, 10))[::-1])
+    color=sns.color_palette("colorblind")[1])
 
 # fig.supylabel(f"Proteins")
 ax.spines['left'].set_linewidth(2)  # Left border thickness
